@@ -412,7 +412,7 @@ class Engine:
             self.db.execute("UPDATE incidents SET escalation=1, updated_at=? WHERE incident_id=?",
                             (now_iso(), inc["incident_id"]))
             wi = loads(self.db.one("SELECT json FROM workflow_inputs WHERE incident_id=?", (inc["incident_id"],))["json"])
-            wi["retriage"].append({"window": first_exceed})
+            wi["retriage"].append({"window": first_exceed, "upto": upto})
             self.db.execute("UPDATE workflow_inputs SET json=? WHERE incident_id=?", (dumps(wi), inc["incident_id"]))
             self.db.audit(action="escalation_required", actor="Risk Prioritiser", actor_type="agent",
                           run_id=self.run_id, incident_id=inc["incident_id"], asset_id=inc["asset_id"],
