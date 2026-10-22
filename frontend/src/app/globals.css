@@ -1,26 +1,171 @@
 @import "tailwindcss";
 
+/* ---------------------------------------------------------------------------
+   InfraGuard design tokens. Dark graphite is the default; light mirrors the
+   same semantic hues on a warm-white base for field and projector use.
+   Status hues: blue = monitoring normal (never "safe"), amber = investigate,
+   vermilion = escalation, violet = data-quality / sensor issue, slate = unavailable.
+--------------------------------------------------------------------------- */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --bg: #0e1116;
+  --surface: #151a22;
+  --raised: #1c2330;
+  --line: #2a3342;
+  --line-soft: #212937;
+  --text: #e8edf4;
+  --muted: #8b97a8;
+  --faint: #5d6878;
+  --blue: #4c8dff;
+  --blue-soft: rgba(76, 141, 255, 0.14);
+  --amber: #ffb020;
+  --amber-soft: rgba(255, 176, 32, 0.14);
+  --red: #ff5a47;
+  --red-soft: rgba(255, 90, 71, 0.15);
+  --violet: #a78bfa;
+  --violet-soft: rgba(167, 139, 250, 0.15);
+  --slate: #6b7685;
+  --slate-soft: rgba(107, 118, 133, 0.18);
+  --band: rgba(76, 141, 255, 0.10);
+  --glow: 0 0 0 1px rgba(76, 141, 255, 0.35), 0 0 24px -6px rgba(76, 141, 255, 0.35);
+  --shadow: 0 1px 2px rgba(0, 0, 0, 0.35), 0 8px 24px -12px rgba(0, 0, 0, 0.5);
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #f7f5f1;
+  --surface: #ffffff;
+  --raised: #f1eee8;
+  --line: #ddd8cf;
+  --line-soft: #e9e5de;
+  --text: #171c24;
+  --muted: #5b6573;
+  --faint: #8b93a0;
+  --blue: #1f63e0;
+  --blue-soft: rgba(31, 99, 224, 0.10);
+  --amber: #b86e00;
+  --amber-soft: rgba(214, 135, 0, 0.13);
+  --red: #d63a28;
+  --red-soft: rgba(214, 58, 40, 0.11);
+  --violet: #6d4fd8;
+  --violet-soft: rgba(109, 79, 216, 0.11);
+  --slate: #66707e;
+  --slate-soft: rgba(102, 112, 126, 0.14);
+  --band: rgba(31, 99, 224, 0.08);
+  --glow: 0 0 0 1px rgba(31, 99, 224, 0.35), 0 0 20px -8px rgba(31, 99, 224, 0.35);
+  --shadow: 0 1px 2px rgba(20, 20, 20, 0.06), 0 8px 24px -14px rgba(20, 20, 20, 0.18);
+  color-scheme: light;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-raised: var(--raised);
+  --color-line: var(--line);
+  --color-line-soft: var(--line-soft);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-blue: var(--blue);
+  --color-blue-soft: var(--blue-soft);
+  --color-amber: var(--amber);
+  --color-amber-soft: var(--amber-soft);
+  --color-red: var(--red);
+  --color-red-soft: var(--red-soft);
+  --color-violet: var(--violet);
+  --color-violet-soft: var(--violet-soft);
+  --color-slate: var(--slate);
+  --color-slate-soft: var(--slate-soft);
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, monospace;
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 14px;
+  --text-base: 16px;
+  --text-lg: 20px;
+  --text-xl: 28px;
+  --text-2xl: 40px;
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html,
+body {
+  background: var(--bg);
+  color: var(--text);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+}
+
+.num,
+.font-mono {
+  font-variant-numeric: tabular-nums;
+}
+
+.num {
+  font-family: var(--font-mono);
+}
+
+:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+::selection {
+  background: var(--blue-soft);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow);
+}
+
+.card-active {
+  box-shadow: var(--glow);
+  border-color: color-mix(in srgb, var(--blue) 55%, var(--line));
+}
+
+.hairline {
+  border-color: var(--line);
+}
+
+.skeleton {
+  background: linear-gradient(90deg, var(--raised) 0%, var(--line-soft) 50%, var(--raised) 100%);
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite linear;
+  border-radius: 6px;
+}
+
+@keyframes shimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+.coach-highlight {
+  position: relative;
+  z-index: 41;
+  box-shadow: 0 0 0 2px var(--amber), 0 0 0 8px var(--amber-soft) !important;
+  border-radius: 12px;
+  transition: box-shadow 200ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }

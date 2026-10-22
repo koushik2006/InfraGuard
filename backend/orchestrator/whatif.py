@@ -55,7 +55,7 @@ def apply_spec(base: RunConfig, asset_id: str, spec: list[dict], cursor_iso: str
 
 
 def evaluate(cfg: RunConfig, asset_id: str, cursor_iso: str, horizon: str, follow: Optional[str],
-             focus_sensor: Optional[str]) -> dict[str, Any]:
+             focus_sensor: Optional[str], feature: Optional[str] = None) -> dict[str, Any]:
     data = prepare_asset(cfg, asset_id)
     hi = _horizon(data, cursor_iso, horizon)
     out: dict[str, Any] = {"horizon_window": hi, "horizon_time": data.rows[data.asset.sensors[0].sensor_id][hi]["t_end"],
@@ -86,8 +86,8 @@ def evaluate(cfg: RunConfig, asset_id: str, cursor_iso: str, horizon: str, follo
     # compact series for the chart overlay
     sid = focus_sensor or (event.primary_sensor_id if event else next(s.sensor_id for s in data.asset.sensors if s.primary))
     sensor = next(s for s in data.asset.sensors if s.sensor_id == sid)
-    feat = (event.deviations[0].feature if event and event.primary_sensor_id == sid
-            else (sensor.detection_features or sensor.features)[0])
+    feat = feature or (event.deviations[0].feature if event and event.primary_sensor_id == sid
+                       else (sensor.detection_features or sensor.features)[0])
     lo = max(0, data.n_ref - 48)
     out["series"] = {"sensor_id": sid, "feature": feat, "points": [
         {"i": i, "v": data.rows[sid][i]["features"].get(feat), "q": data.flags[sid][i].status,
@@ -157,7 +157,8 @@ def run_whatif(db: Database, base: RunConfig, asset_id: str, spec: list[dict], c
     after_cfg, follow = apply_spec(base, asset_id, spec, cursor_iso)
     focus = focus_sensor or next((iv["sensor_id"] for iv in spec if "sensor_id" in iv), None)
     before = evaluate(base, asset_id, cursor_iso, horizon, None, focus)
-    after = evaluate(after_cfg, asset_id, cursor_iso, horizon, follow, focus)
+    after = evaluate(after_cfg, asset_id, cursor_iso, horizon, follow, before['series']['sensor_id'],
+                     before['series']['feature'])
     diff = pipeline.diff_fields(before["fields"], after["fields"])
     lines = explain(before, after, spec, asset_id)
     if not diff:

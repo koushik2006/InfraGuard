@@ -192,6 +192,48 @@ def asset(asset_id: str):
             "records": get_datasource().records(asset_id), "feature_labels": SENSOR_FEATURE_LABELS}
 
 
+@app.get("/api/assets/{asset_id}/sensors")
+def sensors(asset_id: str):
+    """Per-sensor live state for the schematic: latest reading, quality, z, trend, anomaly role, evidence."""
+    if asset_id not in ASSETS:
+        raise HTTPException(404, "unknown asset")
+    d = engine.data[asset_id]
+    upto = engine.ingested[asset_id]
+    inc = engine._open_incident(asset_id)
+    ev = loads(db.one("SELECT json FROM anomaly_events WHERE event_id=?", (inc["event_id"],))["json"]) if inc else None
+    refs = [loads(r["json"]) for r in db.all("SELECT json FROM evidence_refs WHERE incident_id=?", (inc["incident_id"],))] if inc else []
+    out = []
+    for s in d.asset.sensors:
+        feat = (s.detection_features or s.features)[0]
+        if ev and s.sensor_id == ev["primary_sensor_id"]:
+            feat = ev["deviations"][0]["feature"]
+        elif ev and ev["deviations"] and ev["deviations"][0]["feature"] in (s.detection_features or s.features):
+            feat = ev["deviations"][0]["feature"]
+        fl = d.flags[s.sensor_id][upto]
+        zrow = d.z[s.sensor_id][upto]
+        role = None
+        if ev:
+            role = "primary" if s.sensor_id == ev["primary_sensor_id"] else \
+                "corroborating" if s.sensor_id in ev["corroborating_sensors"] else None
+        fb = feature_baseline(d.baseline, s.sensor_id, feat)
+        out.append({
+            "sensor_id": s.sensor_id, "kind": s.kind, "location": s.location, "schematic": s.schematic.model_dump() if s.schematic else None,
+            "feature": feat, "feature_label": SENSOR_FEATURE_LABELS.get(feat, feat), "unit": s.units.get(feat, ""),
+            "latest": d.rows[s.sensor_id][upto]["features"].get(feat), "latest_time": d.rows[s.sensor_id][upto]["t_end"],
+            "z": zrow.get(feat), "exceeding": d.exceed[s.sensor_id][upto], "quality": fl.status, "quality_detail": fl.detail,
+            "detection_sensor": bool(s.detection_features), "baseline_median": fb.median if fb else None,
+            "baseline_version": d.baseline.version, "baseline_status": d.baseline.status,
+            "trend": [d.rows[s.sensor_id][i]["features"].get(feat) for i in range(max(0, upto - 47), upto + 1)],
+            "trend_quality": [d.flags[s.sensor_id][i].status for i in range(max(0, upto - 47), upto + 1)],
+            "incident_role": role, "incident_id": inc["incident_id"] if inc and role else None,
+            "anomaly_interval": {"onset": ev["onset_time"], "last": ev["last_time"]} if role else None,
+            "evidence": [{"ref_id": r["ref_id"], "title": r["title"], "summary": r["summary"]} for r in refs
+                         if r["source_id"].startswith(s.sensor_id)],
+        })
+    return {"asset_id": asset_id, "cursor": iso(engine.cursor), "sensors": out,
+            "open_incident": inc["incident_id"] if inc else None, "status": engine.asset_status(asset_id)}
+
+
 @app.get("/api/assets/{asset_id}/series")
 def series(asset_id: str, sensor_id: str, feature: str, window: int = 0):
     if asset_id not in ASSETS:
