@@ -22,7 +22,9 @@ Priority = Literal["P1", "P2", "P3", "P4"]
 VerificationOutcome = Literal["persists", "improves", "cannot_assess"]
 AgentName = Literal["sentinel", "investigator", "prioritiser", "planner", "verifier"]
 AgentStatus = Literal["idle", "running", "done", "fallback_used", "error"]
-WorkOrderStatus = Literal["proposed", "approved", "rejected", "assigned", "in_progress", "completed"]
+WorkOrderStatus = Literal["proposed", "approved", "rejected", "assigned", "in_progress", "awaiting_verification",
+                          "verified", "returned", "completed"]
+Role = Literal["viewer", "engineer", "asset_owner", "maintenance"]
 FollowUpSet = Literal["persists", "improves", "insufficient"]
 
 
@@ -42,7 +44,7 @@ class SchematicPoint(Strict):
 class SensorConfig(Strict):
     sensor_id: str
     asset_id: str
-    kind: Literal["accelerometer", "tiltmeter", "crackmeter", "temperature"]
+    kind: Literal["accelerometer", "tiltmeter", "crackmeter", "temperature", "strain_gauge", "anemometer"]
     location: str
     sampling_rate_hz: float
     features: list[str]
@@ -50,6 +52,8 @@ class SensorConfig(Strict):
     detection_features: list[str] = Field(default_factory=list)
     primary: bool = False
     schematic: Optional[SchematicPoint] = None
+    component_id: Optional[str] = None      # id of the structural component the sensor is mounted on (None = unmapped)
+    component_name: Optional[str] = None
 
 
 class EngineeringThreshold(Strict):
@@ -183,6 +187,34 @@ class DataQualityGate(Strict):
     issues: list[str] = Field(default_factory=list)
 
 
+class SensorFinding(Strict):
+    """One sensor's contribution to an incident, frozen at the window it was raised (readings are not invented:
+    value / baseline / z come from the stored window features and the asset's own baseline)."""
+    sensor_id: str
+    role: Literal["primary", "corroborating", "context"]
+    used_for_detection: bool
+    component_id: Optional[str] = None
+    component_name: Optional[str] = None
+    location: str
+    feature: str
+    feature_label: str
+    unit: str
+    value: float
+    baseline_median: float
+    baseline_scale: float
+    z: float
+    deviation: float
+    deviation_pct: Optional[float] = None
+    onset_time: str
+    raised_window: int
+    raised_time: str
+    persistence_count: int
+    persistence_window: int
+    quality_ok: bool
+    trend: list[Optional[float]] = Field(default_factory=list)
+    reason: str
+
+
 class AnomalyEvent(Strict):
     event_id: str
     asset_id: str
@@ -210,6 +242,7 @@ class AnomalyEvent(Strict):
     scenario_seed: int
     run_id: str
     input_hash: str
+    findings: list[SensorFinding] = Field(default_factory=list)
     note: str = "Anomaly indicator relative to this asset's own baseline. Not a failure probability."
 
 
@@ -264,6 +297,12 @@ class NarrativeDraft(Strict):
     model: Optional[str] = None
 
 
+class FindingEvidence(Strict):
+    sensor_id: str
+    supports: list[Claim]
+    contradicts: list[Claim]
+
+
 class InvestigationResult(Strict):
     event_id: str
     asset_id: str
@@ -274,6 +313,7 @@ class InvestigationResult(Strict):
     narrative: NarrativeDraft
     tool_calls: list[ToolCall]
     rules_version: str
+    finding_evidence: list[FindingEvidence] = Field(default_factory=list)
 
 
 # --------------------------------------------------------------------------
@@ -284,6 +324,16 @@ class TriageFactor(Strict):
     observed: str
     points: int
     rule: str
+
+
+class FindingContribution(Strict):
+    sensor_id: str
+    component_name: Optional[str] = None
+    role: str
+    feature_label: str
+    z: float
+    persistence_count: int
+    counted_as: str
 
 
 class TriageResult(Strict):
@@ -301,6 +351,8 @@ class TriageResult(Strict):
     insufficient_evidence_reason: Optional[str] = None
     recommended_first_action: str
     rules_version: str
+    contributing_findings: list[FindingContribution] = Field(default_factory=list)
+    uncertainty: list[str] = Field(default_factory=list)
     disclaimer: str = (
         "Decision support: an inspection-priority recommendation for a qualified engineer. "
         "Not a structural-safety assessment."
@@ -312,6 +364,40 @@ class PlanStep(Strict):
     action: str
     rationale: str
     refs: list[str] = Field(default_factory=list)
+
+
+class Assignment(Strict):
+    team: str
+    person: str
+    due_date: str            # YYYY-MM-DD, compared with the simulation clock
+    assigned_by: str
+    assigned_at: str
+    sim_time: str
+
+
+class Attachment(Strict):
+    filename: str
+    stored_as: str
+    size: int
+    sha256: str
+    content_type: str
+
+
+class Completion(Strict):
+    note: str
+    submitted_by: str
+    submitted_at: str
+    sim_time: str
+    attachment: Optional[Attachment] = None
+
+
+class Review(Strict):
+    decision: Literal["verified", "further_work"]
+    reviewer: str
+    role: str
+    reason: str
+    at: str
+    sim_time: str
 
 
 class WorkOrderDraft(Strict):
@@ -327,12 +413,20 @@ class WorkOrderDraft(Strict):
     assigned_to: Optional[str] = None
     plan_text: NarrativeDraft
     label: str = "Proposal: requires human review"
+    approved_by: Optional[str] = None
+    approved_at: Optional[str] = None
+    assignment: Optional[Assignment] = None
+    delay_reason: Optional[str] = None
+    progress_note: Optional[str] = None
+    completion: Optional[Completion] = None
+    review: Optional[Review] = None
+    escalated_at: Optional[str] = None
 
 
 class ApprovalRequest(Strict):
     decision: Literal["approve", "reject", "edit_approve"]
     actor: str
-    role: Literal["viewer", "engineer", "asset_owner"]
+    role: Role
     note: str = ""
     edits: Optional[dict[str, Any]] = None
 

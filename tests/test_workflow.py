@@ -67,14 +67,44 @@ def test_audit_is_append_only(engine):
         engine.db.execute("DELETE FROM audit_events")
 
 
-def test_escalation_only_with_owner_criterion(engine):
+def test_only_bridge_alpha_is_active_by_default(engine):
+    snap = engine.snapshot()
+    assert [a["asset_id"] for a in snap["assets"]] == ["BRG-017"]
+    assert snap["assets"][0]["name"] == "Bridge Alpha"
     engine.tick(400)
-    inc = {i["asset_id"]: i for i in engine.snapshot()["incidents"]}
+    assert {i["asset_id"] for i in engine.snapshot()["incidents"]} <= {"BRG-017"}
+
+
+def test_additional_assets_are_enabled_by_data_not_redesign():
+    """Escalation only comes from an owner-supplied criterion; enabling assets is just the active list."""
+    from backend.db.database import Database
+    from backend.orchestrator.engine import Engine
+    e = Engine(Database(":memory:"), active_assets=["BRG-017", "BLD-204", "RW-031"])
+    e.tick(400)
+    inc = {i["asset_id"]: i for i in e.snapshot()["incidents"]}
     assert inc["BLD-204"]["escalation"] is True          # demo criterion exceeded
     assert inc["BRG-017"]["escalation"] is False         # no criterion configured
-    statuses = {a["asset_id"]: a["status"] for a in engine.snapshot()["assets"]}
+    statuses = {a["asset_id"]: a["status"] for a in e.snapshot()["assets"]}
     assert statuses["BLD-204"] == "Escalation required" and statuses["BRG-017"] == "Investigate"
     assert statuses["RW-031"] == "No anomaly detected"
+
+
+def test_api_hides_inactive_assets_and_lists_work_orders(engine):
+    from fastapi.testclient import TestClient
+    import backend.api.main as api
+    api.engine, api.db = engine, engine.db
+    with TestClient(api.app) as c:
+        assert [a["asset_id"] for a in c.get("/api/assets").json()] == ["BRG-017"]
+        assert c.get("/api/assets/BLD-204").status_code == 404
+        assert c.get("/api/assets/BLD-204/sensors").status_code == 404
+        assert set(c.get("/api/scenario").json()["variants"]) == {"BRG-017"}
+        assert c.get("/api/work-orders").json() == []
+        opened(engine)
+        rows = c.get("/api/work-orders").json()
+        assert len(rows) == 1 and rows[0]["status"] == "proposed" and rows[0]["asset_id"] == "BRG-017"
+        d = c.get(f"/api/work-orders/{rows[0]['work_order_id']}").json()
+        assert d["incident_id"] == rows[0]["incident_id"] and d["work_order"]["label"] == "Proposal: requires human review"
+        assert c.get("/api/work-orders/WO-9999").status_code == 404
 
 
 def test_replay_is_read_only_and_reproducible(engine):
@@ -170,3 +200,138 @@ def test_system_works_with_llm_down(engine):
         assert any(r["fallback_used"] for r in runs) and engine.incident(inc)["work_orders"]
     finally:
         llm.set_transport(None)
+
+
+# ---------------------------------------------------------------- digital twin sensor states
+def sensor_states(engine):
+    """Same logic as GET /api/assets/BRG-017/sensors, exercised through the API with this engine."""
+    from fastapi.testclient import TestClient
+    import backend.api.main as api
+    api.engine, api.db = engine, engine.db
+    with TestClient(api.app) as c:
+        return {s["sensor_id"]: s for s in c.get("/api/assets/BRG-017/sensors").json()["sensors"]}
+
+
+def test_twin_states_come_from_backend_detection(engine):
+    s = sensor_states(engine)
+    assert len(s) == 9 and all(x["state"] == "normal" for x in s.values())
+    engine.tick(60)  # past the 08:15 truck: transient only
+    s = sensor_states(engine)
+    assert all(x["state"] in ("normal", "observation") for x in s.values())
+    assert engine.snapshot()["incidents"] == []
+    opened(engine)
+    s = sensor_states(engine)
+    assert s["ACC-M1"]["state"] == "investigate" and s["ACC-Q1"]["state"] == "investigate"
+    assert s["TLT-T1"]["state"] == "normal" and s["TMP-B1"]["state"] == "normal"
+    assert s["STR-G1"]["state"] == "observation" and not s["STR-G1"]["detection_sensor"]  # context only
+
+
+def test_context_sensors_cannot_trigger_events(engine):
+    from backend.detector.detector import prepare_asset, scan_all_events
+    from tests.conftest import make_run
+    d = prepare_asset(make_run(**{"BRG-017": "benign_transient"}), "BRG-017")
+    assert max(abs(z) for z in (r["strain"] for r in d.z["STR-G1"][d.n_ref:] if r["strain"] is not None)) >= 3.5
+    assert scan_all_events(d) == []  # the truck moves strain far beyond threshold, yet no alert
+
+
+def test_frozen_fault_marks_sensor_data_quality(engine):
+    opened(engine)
+    engine.inject_fault("TMP-B1", "frozen_sensor", "tester")
+    engine.tick(5)
+    assert sensor_states(engine)["TMP-B1"]["state"] == "data_quality"
+
+
+# ---------------------------------------------------------------- staged (step-by-step) agent execution
+def staged_engine():
+    from backend.db.database import Database
+    from backend.orchestrator.engine import Engine
+    return Engine(Database(":memory:"), staged=True)
+
+
+def agents_run(engine, inc):
+    return [r["agent"] for r in engine.incident(inc)["agent_runs"]]
+
+
+def test_staged_mode_stops_after_each_agent_and_never_auto_approves():
+    e = staged_engine()
+    e.advance_until_event()
+    inc = e.snapshot()["incidents"][0]["incident_id"]
+    d = e.incident(inc)
+    assert d["incident"]["state"] == "DETECTED" and agents_run(e, inc) == ["sentinel"]
+    assert d["investigation"] is None and d["triage"] == [] and d["work_orders"] == []
+    assert d["next_stage"]["agent"] == "investigator"
+
+    d = e.advance_incident(inc, "A. Rao", "viewer")          # advancing is not consequential: any role
+    assert d["incident"]["state"] == "INVESTIGATING" and agents_run(e, inc) == ["sentinel", "investigator"]
+    assert d["investigation"]["evidence_refs"] and d["triage"] == [] and d["work_orders"] == []
+    assert d["next_stage"]["agent"] == "prioritiser"
+
+    d = e.advance_incident(inc, "A. Rao", "engineer")
+    assert d["incident"]["state"] == "PRIORITISING" and d["triage"][0]["priority"] in ("P1", "P2", "P3", "P4")
+    assert d["work_orders"] == [] and d["next_stage"]["agent"] == "planner"
+
+    d = e.advance_incident(inc, "A. Rao", "engineer")
+    assert d["incident"]["state"] == "AWAITING_APPROVAL" and d["work_orders"][0]["status"] == "proposed"
+    assert d["approvals"] == [] and d["next_stage"] is None and "verifier" not in agents_run(e, inc)
+    with pytest.raises(WorkflowError):
+        e.advance_incident(inc, "A. Rao", "engineer")         # nothing left to run: approval is a human decision
+    acts = [a["action"] for a in e.incident(inc)["audit"]]
+    assert acts.count("agent_step_requested") == 3
+
+
+def test_staged_advance_rejects_stale_double_clicks():
+    e = staged_engine()
+    e.advance_until_event()
+    inc = e.snapshot()["incidents"][0]["incident_id"]
+    e.advance_incident(inc, "A", "engineer", expected_state="DETECTED")
+    with pytest.raises(WorkflowError):                        # second click carrying the old state must not skip a stage
+        e.advance_incident(inc, "A", "engineer", expected_state="DETECTED")
+    assert e.incident(inc)["incident"]["state"] == "INVESTIGATING"
+
+
+def test_staged_results_equal_automatic_results():
+    from backend.orchestrator.pipeline import decision_fields
+    auto_engine = Engine_auto()
+    inc_a = opened(auto_engine)
+    st = staged_engine()
+    st.advance_until_event()
+    inc_s = st.snapshot()["incidents"][0]["incident_id"]
+    for _ in range(3):
+        st.advance_incident(inc_s, "A", "engineer")
+    a, s = auto_engine.incident(inc_a), st.incident(inc_s)
+    key = lambda d: ([h["key"] + h["support"] for h in d["investigation"]["hypotheses"]], d["triage"][0]["demonstration_triage_score"],
+                     d["triage"][0]["priority"], [x["action"] for x in d["work_orders"][0]["steps"]])
+    assert key(a) == key(s)
+
+
+def Engine_auto():
+    from backend.db.database import Database
+    from backend.orchestrator.engine import Engine
+    return Engine(Database(":memory:"))
+
+
+def test_staged_incident_follows_the_same_approval_and_verification_rules():
+    e = staged_engine()
+    e.advance_until_event()
+    inc = e.snapshot()["incidents"][0]["incident_id"]
+    with pytest.raises(WorkflowError):
+        e.decide(inc, ApprovalRequest(decision="approve", **ENG))   # cannot approve before the planner has run
+    for _ in range(3):
+        e.advance_incident(inc, "A", "engineer")
+    with pytest.raises(WorkflowError):
+        e.load_follow_up(inc, "improves", **ENG)                    # verifier not before approval
+    e.decide(inc, ApprovalRequest(decision="approve", **ENG))
+    assert e.load_follow_up(inc, "persists", **ENG)["outcome"] == "persists"
+    assert "verifier" in agents_run(e, inc)
+
+
+def test_replay_works_on_partly_advanced_and_completed_staged_incidents():
+    e = staged_engine()
+    e.advance_until_event()
+    inc = e.snapshot()["incidents"][0]["incident_id"]
+    assert replay_incident(e.db, inc)["status"] == "REPRODUCED"      # only the Sentinel has run
+    e.advance_incident(inc, "A", "engineer")
+    assert replay_incident(e.db, inc)["status"] == "REPRODUCED"
+    for _ in range(2):
+        e.advance_incident(inc, "A", "engineer")
+    assert replay_incident(e.db, inc)["status"] == "REPRODUCED"

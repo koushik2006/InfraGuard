@@ -12,3 +12,4 @@ screenshots/tmp/
 *.db-wal
 *.db-shm
 .pytest_cache/
+InfraGuard-prototype.zip

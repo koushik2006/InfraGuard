@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import os
 from contextlib import asynccontextmanager
 from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from backend.agents.investigator import HYPOTHESIS_RULES
@@ -24,11 +25,22 @@ from backend.orchestrator.replay import replay_incident
 from backend.orchestrator.whatif import replay_whatif, run_whatif
 from backend.scenarios.assets import ASSETS, LABELLED_EVENTS, VARIANTS, iso
 from backend.scenarios.datasource import get_datasource
+from backend.scenarios.directory import DEMO_USERS, TEAMS
 from backend.scenarios.fixtures import SENSOR_FEATURE_LABELS
 from backend.version import versions
 
 db = Database()
-engine = Engine(db)
+# Agent stages run one at a time by default ("Continue to next step"); INFRAGUARD_AGENT_MODE=auto runs them back to back.
+engine = Engine(db, staged=os.environ.get("INFRAGUARD_AGENT_MODE", "staged").lower() != "auto")
+
+
+def locked(fn):
+    """Reads of engine state must not interleave with a reset or tick running on another thread."""
+    @functools.wraps(fn)
+    def wrapper(*a, **k):
+        with engine.lock:
+            return fn(*a, **k)
+    return wrapper
 
 
 async def _ticker() -> None:
@@ -66,7 +78,7 @@ async def _ve(_: Request, exc: ValueError):
 
 class Actor(BaseModel):
     actor: str = "Demo Engineer (simulated user)"
-    role: Literal["viewer", "engineer", "asset_owner"] = "engineer"
+    role: Literal["viewer", "engineer", "asset_owner", "maintenance"] = "engineer"
 
 
 class SpeedBody(BaseModel):
@@ -88,6 +100,10 @@ class FaultBody(Actor):
     kind: Literal["frozen_sensor", "stale_sensor"] = "frozen_sensor"
 
 
+class AdvanceBody(Actor):
+    expected_state: Optional[str] = None
+
+
 class FollowUpBody(Actor):
     set: Literal["persists", "improves", "insufficient"]
 
@@ -96,9 +112,31 @@ class CloseBody(Actor):
     note: str
 
 
-class WOStatusBody(Actor):
-    status: Literal["assigned", "in_progress", "completed"]
+class AssignBody(Actor):
+    team: str
+    person: str
+    due_date: str
+
+
+class ProgressBody(Actor):
     note: str = ""
+    delay_reason: str = ""
+
+
+class AttachmentBody(BaseModel):
+    filename: str
+    content_type: str
+    data_base64: str
+
+
+class EvidenceBody(Actor):
+    note: str
+    attachment: Optional[AttachmentBody] = None
+
+
+class ReviewBody(Actor):
+    decision: Literal["verify", "further_work"]
+    reason: str = ""
 
 
 class WhatIfBody(Actor):
@@ -116,6 +154,7 @@ def health():
 
 
 @app.get("/api/state")
+@locked
 def state():
     s = engine.snapshot()
     s["llm"] = llm.status()
@@ -165,9 +204,11 @@ def inject(b: FaultBody):
 
 
 @app.get("/api/scenario")
+@locked
 def scenario():
-    return {"run": engine.run.model_dump(), "run_id": engine.run_id, "variants": VARIANTS,
-            "labelled_events": LABELLED_EVENTS, "data_source": get_datasource().label,
+    return {"run": engine.run.model_dump(), "run_id": engine.run_id,
+            "variants": {a: v for a, v in VARIANTS.items() if a in engine.active},
+            "labelled_events": {a: v for a, v in LABELLED_EVENTS.items() if a in engine.active}, "data_source": get_datasource().label,
             "environment_presets": {"nominal": 0, "heatwave": "+8 °C on monitoring days (bounded)",
                                     "cold_snap": "-8 °C on monitoring days (bounded)"},
             "generator": {"bridge": "25 Hz × 512-sample acceleration snippets per 15-min window → RMS, peak, "
@@ -179,13 +220,15 @@ def scenario():
 
 # ----------------------------------------------------------------------------- assets
 @app.get("/api/assets")
+@locked
 def assets():
-    return [engine.asset_summary(a) for a in ASSETS]
+    return [engine.asset_summary(a) for a in engine.active]
 
 
 @app.get("/api/assets/{asset_id}")
+@locked
 def asset(asset_id: str):
-    if asset_id not in ASSETS:
+    if asset_id not in engine.active:
         raise HTTPException(404, "unknown asset")
     d = engine.data[asset_id]
     return {"config": d.asset.model_dump(), "baseline": d.baseline.model_dump(), "summary": engine.asset_summary(asset_id),
@@ -193,50 +236,95 @@ def asset(asset_id: str):
 
 
 @app.get("/api/assets/{asset_id}/sensors")
+@locked
 def sensors(asset_id: str):
-    """Per-sensor live state for the schematic: latest reading, quality, z, trend, anomaly role, evidence."""
-    if asset_id not in ASSETS:
+    """Per-sensor live state for the 3D view. Every flagged marker is tied to a real finding of an incident, or is
+    explicitly labelled as a transient observation / continuation of a closed incident."""
+    if asset_id not in engine.active:
         raise HTTPException(404, "unknown asset")
     d = engine.data[asset_id]
     upto = engine.ingested[asset_id]
     inc = engine._open_incident(asset_id)
     ev = loads(db.one("SELECT json FROM anomaly_events WHERE event_id=?", (inc["event_id"],))["json"]) if inc else None
+    closed = None
+    if not inc:
+        row = db.one("SELECT i.incident_id iid, e.json j FROM incidents i JOIN anomaly_events e ON e.event_id=i.event_id "
+                     "WHERE i.run_id=? AND i.asset_id=? AND i.closed=1 ORDER BY i.created_at DESC", (engine.run_id, asset_id))
+        closed = {"incident_id": row["iid"], **loads(row["j"])} if row else None
     refs = [loads(r["json"]) for r in db.all("SELECT json FROM evidence_refs WHERE incident_id=?", (inc["incident_id"],))] if inc else []
+    findings = {f["sensor_id"]: f for f in (ev or {}).get("findings", [])}
+    closed_findings = {f["sensor_id"]: f for f in (closed or {}).get("findings", [])}
+    thr = d.asset.detection.z_threshold
+    obs_thr = round(0.7 * thr, 2)
     out = []
     for s in d.asset.sensors:
-        feat = (s.detection_features or s.features)[0]
-        if ev and s.sensor_id == ev["primary_sensor_id"]:
-            feat = ev["deviations"][0]["feature"]
-        elif ev and ev["deviations"] and ev["deviations"][0]["feature"] in (s.detection_features or s.features):
-            feat = ev["deviations"][0]["feature"]
-        fl = d.flags[s.sensor_id][upto]
-        zrow = d.z[s.sensor_id][upto]
-        role = None
-        if ev:
-            role = "primary" if s.sensor_id == ev["primary_sensor_id"] else \
-                "corroborating" if s.sensor_id in ev["corroborating_sensors"] else None
-        fb = feature_baseline(d.baseline, s.sensor_id, feat)
+        sid = s.sensor_id
+        fnd = findings.get(sid)
+        feat = fnd["feature"] if fnd else (s.detection_features or s.features)[0]
+        fl = d.flags[sid][upto]
+        zrow = d.z[sid][upto]
+        z = zrow.get(feat)
+        role = fnd["role"] if fnd else None
+        kind = "incident_finding" if fnd else None
+        incident_id = inc["incident_id"] if fnd and inc else None
+        if fl.status != "ok":
+            state, reason = "data_quality", (f"{fl.status.capitalize()}: {fl.detail}. Excluded from detection; a sensor issue, not a structural finding.")
+        elif role in ("primary", "corroborating"):
+            state = "escalation" if inc["escalation"] and role == "primary" else "investigate"
+            reason = fnd["reason"]
+        elif fnd:  # context finding
+            state, reason = "observation", fnd["reason"]
+        elif closed and sid in closed_findings and (d.exceed[sid][upto] or (not s.detection_features and z is not None and abs(z) >= obs_thr)):
+            state, kind, incident_id = "observation", "closed_incident", closed["incident_id"]
+            reason = f"The deviation continues, but it belongs to closed incident {closed['incident_id']} and is not re-opened as a new incident."
+        elif d.exceed[sid][upto]:
+            state, kind = "observation", "transient"
+            reason = (f"|z| = {abs(z):.1f} ≥ {thr} in the latest window, but the persistence rule (≥{d.asset.detection.min_exceedances} of "
+                      f"{d.asset.detection.persistence_windows} windows) is not met. The Sentinel logs this as a transient observation; it is not an incident.")
+        elif not s.detection_features and z is not None and abs(z) >= obs_thr:
+            state, kind = "observation", "transient"
+            reason = (f"Context sensor (not used for detection): |z| = {abs(z):.1f} ≥ {obs_thr} (0.7 × threshold) with no open incident. "
+                      "Shown as supporting context only; not an incident.")
+        else:
+            state, reason = "normal", "Within this sensor's own baseline range."
+        fb = feature_baseline(d.baseline, sid, feat)
         out.append({
-            "sensor_id": s.sensor_id, "kind": s.kind, "location": s.location, "schematic": s.schematic.model_dump() if s.schematic else None,
+            "state": state, "state_reason": reason, "finding_kind": kind, "finding": fnd,
+            "component": {"id": s.component_id, "name": s.component_name, "mapped": bool(s.component_id)},
+            "sensor_id": sid, "kind": s.kind, "location": s.location, "schematic": s.schematic.model_dump() if s.schematic else None,
             "feature": feat, "feature_label": SENSOR_FEATURE_LABELS.get(feat, feat), "unit": s.units.get(feat, ""),
-            "latest": d.rows[s.sensor_id][upto]["features"].get(feat), "latest_time": d.rows[s.sensor_id][upto]["t_end"],
-            "z": zrow.get(feat), "exceeding": d.exceed[s.sensor_id][upto], "quality": fl.status, "quality_detail": fl.detail,
+            "latest": d.rows[sid][upto]["features"].get(feat), "latest_time": d.rows[sid][upto]["t_end"],
+            "z": z, "exceeding": d.exceed[sid][upto], "quality": fl.status, "quality_detail": fl.detail,
             "detection_sensor": bool(s.detection_features), "baseline_median": fb.median if fb else None,
             "baseline_version": d.baseline.version, "baseline_status": d.baseline.status,
-            "trend": [d.rows[s.sensor_id][i]["features"].get(feat) for i in range(max(0, upto - 47), upto + 1)],
-            "trend_quality": [d.flags[s.sensor_id][i].status for i in range(max(0, upto - 47), upto + 1)],
-            "incident_role": role, "incident_id": inc["incident_id"] if inc and role else None,
-            "anomaly_interval": {"onset": ev["onset_time"], "last": ev["last_time"]} if role else None,
-            "evidence": [{"ref_id": r["ref_id"], "title": r["title"], "summary": r["summary"]} for r in refs
-                         if r["source_id"].startswith(s.sensor_id)],
+            "trend": [d.rows[sid][i]["features"].get(feat) for i in range(max(0, upto - 47), upto + 1)],
+            "trend_quality": [d.flags[sid][i].status for i in range(max(0, upto - 47), upto + 1)],
+            "incident_role": role, "incident_id": incident_id,
+            "anomaly_interval": {"onset": fnd["onset_time"], "last": ev["last_time"]} if fnd and ev else None,
+            "evidence": [{"ref_id": r["ref_id"], "title": r["title"], "summary": r["summary"]} for r in refs if r["source_id"].startswith(sid)],
         })
-    return {"asset_id": asset_id, "cursor": iso(engine.cursor), "sensors": out,
+
+    def latest(sid: str, feature: str):
+        return d.rows[sid][upto]["features"].get(feature) if sid in d.rows and d.flags[sid][upto].status == "ok" else None
+
+    e_row = d.env[upto] if d.env else {}
+    env = {"temperature_c": latest("TMP-B1", "temp"), "wind_ms": latest("WND-1", "wind"),
+           "traffic_index": e_row.get("traffic_index"), "heavy_vehicle": e_row.get("heavy_vehicle"),
+           "time": d.rows["TMP-B1"][upto]["t_end"],
+           "note": "Simulated environment feed; traffic index is a simulated proxy, not a traffic count."}
+    incident = None
+    if inc:
+        brief = engine._incident_brief(inc)
+        incident = {**brief, "findings_count": len(findings), "finding_sensors": list(findings)}
+    return {"asset_id": asset_id, "cursor": iso(engine.cursor), "sensors": out, "environment": env, "incident": incident,
+            "reporting": sum(1 for x in out if x["quality"] == "ok"), "total": len(out),
             "open_incident": inc["incident_id"] if inc else None, "status": engine.asset_status(asset_id)}
 
 
 @app.get("/api/assets/{asset_id}/series")
+@locked
 def series(asset_id: str, sensor_id: str, feature: str, window: int = 0):
-    if asset_id not in ASSETS:
+    if asset_id not in engine.active:
         raise HTTPException(404, "unknown asset")
     d = engine.data[asset_id]
     if sensor_id not in d.rows:
@@ -284,13 +372,15 @@ def series(asset_id: str, sensor_id: str, feature: str, window: int = 0):
 
 # ----------------------------------------------------------------------------- incidents & workflow
 @app.get("/api/incidents")
+@locked
 def incidents(all_runs: bool = False):
     q = "SELECT * FROM incidents" + ("" if all_runs else " WHERE run_id = ?") + " ORDER BY created_at DESC"
     rows = db.all(q, () if all_runs else (engine.run_id,))
-    return [engine._incident_brief(r) for r in rows]
+    return [engine._incident_brief(r) for r in rows if r["asset_id"] in engine.active]
 
 
 @app.get("/api/incidents/{incident_id}")
+@locked
 def incident(incident_id: str):
     return engine.incident(incident_id)
 
@@ -298,6 +388,11 @@ def incident(incident_id: str):
 @app.post("/api/incidents/{incident_id}/decision")
 def decide(incident_id: str, b: ApprovalRequest):
     return engine.decide(incident_id, b)
+
+
+@app.post("/api/incidents/{incident_id}/advance")
+def advance(incident_id: str, b: AdvanceBody):
+    return engine.advance_incident(incident_id, b.actor, b.role, b.expected_state)
 
 
 @app.post("/api/incidents/{incident_id}/replan")
@@ -315,9 +410,63 @@ def close(incident_id: str, b: CloseBody):
     return engine.close_incident(incident_id, b.actor, b.role, b.note)
 
 
-@app.post("/api/work-orders/{wo_id}/status")
-def wo_status(wo_id: str, b: WOStatusBody):
-    return engine.set_work_order_status(wo_id, b.status, b.actor, b.role, b.note)
+@app.get("/api/directory")
+def directory():
+    """Fictional demo teams, officers and users (no authentication in this demo)."""
+    return {"teams": TEAMS, "users": DEMO_USERS, "demo": True}
+
+
+@app.get("/api/work-orders")
+@locked
+def work_orders():
+    """Work orders of the current run for active assets, newest first."""
+    return engine.work_order_rows()
+
+
+@app.get("/api/work-orders/{wo_id}")
+@locked
+def work_order(wo_id: str):
+    engine.check_overdue()
+    v = engine.work_order_view(wo_id)
+    w = db.one("SELECT incident_id, asset_id FROM work_orders WHERE work_order_id=?", (wo_id,))
+    return {**v, "incident_id": w["incident_id"], "asset_id": w["asset_id"],
+            "history_count": db.one("SELECT COUNT(*) c FROM work_order_events WHERE work_order_id=?", (wo_id,))["c"]}
+
+
+@app.get("/api/work-orders/{wo_id}/history")
+@locked
+def work_order_history(wo_id: str):
+    engine.check_overdue()
+    return engine.work_order_history(wo_id)
+
+
+@app.post("/api/work-orders/{wo_id}/assign")
+def wo_assign(wo_id: str, b: AssignBody):
+    return engine.assign_work_order(wo_id, b.team, b.person, b.due_date, b.actor, b.role)
+
+
+@app.post("/api/work-orders/{wo_id}/progress")
+def wo_progress(wo_id: str, b: ProgressBody):
+    return engine.update_progress(wo_id, b.note, b.delay_reason, b.actor, b.role)
+
+
+@app.post("/api/work-orders/{wo_id}/evidence")
+def wo_evidence(wo_id: str, b: EvidenceBody):
+    return engine.submit_evidence(wo_id, b.note, b.attachment.model_dump() if b.attachment else None, b.actor, b.role)
+
+
+@app.post("/api/work-orders/{wo_id}/review")
+def wo_review(wo_id: str, b: ReviewBody):
+    return engine.review_work_order(wo_id, b.decision, b.reason, b.actor, b.role)
+
+
+@app.get("/api/work-orders/{wo_id}/evidence-file")
+def wo_evidence_file(wo_id: str):
+    try:
+        path, att = engine.evidence_path(wo_id)
+    except WorkflowError as e:
+        raise HTTPException(e.status_code, str(e))
+    return FileResponse(path, media_type=att.content_type, filename=att.filename)
 
 
 @app.post("/api/incidents/{incident_id}/replay")
@@ -337,6 +486,7 @@ def replays(incident_id: str):
 
 # ----------------------------------------------------------------------------- audit
 @app.get("/api/audit")
+@locked
 def audit(incident_id: Optional[str] = None, limit: int = 300, all_runs: bool = False):
     if incident_id:
         rows = db.all("SELECT * FROM audit_events WHERE incident_id=? ORDER BY id DESC LIMIT ?", (incident_id, limit))
@@ -388,7 +538,7 @@ def rules():
     return {"triage": TRIAGE_RULES, "priority_table": [{"min_score": r[0], "priority": r[1], "label": r[2],
                                                         "timeframe": r[3]} for r in PRIORITY_TABLE],
             "hypotheses": HYPOTHESIS_RULES, "verifier": VERIFIER_RULES, "versions": versions(),
-            "detection": {a: ASSETS[a].detection.model_dump() for a in ASSETS}}
+            "detection": {a: ASSETS[a].detection.model_dump() for a in engine.active}}
 
 
 @app.get("/api/metrics")

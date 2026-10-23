@@ -2,6 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import { api, post } from "./api";
+import { DEMO_USERS } from "./directory";
 import type { AppState, AuditRow, Role } from "./types";
 
 export interface Toast { id: number; tone: "blue" | "amber" | "red" | "violet" | "slate"; title: string; body?: string; href?: string }
@@ -44,7 +45,7 @@ const TOAST_ACTIONS: Record<string, Toast["tone"]> = {
 export function AppProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<AppState | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [user, setUserState] = useState<{ name: string; role: Role }>({ name: "A. Rao (simulated engineer)", role: "engineer" });
+  const [user, setUserState] = useState<{ name: string; role: Role }>({ name: "A. Rao (demo engineer)", role: "engineer" });
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -58,7 +59,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
       const t = localStorage.getItem("ig-theme");
       if (t === "light" || t === "dark") setTheme(t);
       const u = localStorage.getItem("ig-user");
-      if (u) setUserState(JSON.parse(u));
+      if (u) { const p = JSON.parse(u); if (DEMO_USERS.some((x) => x.name === p.name && x.role === p.role)) setUserState(p); }
     } catch {}
   }, []);
   useEffect(() => {

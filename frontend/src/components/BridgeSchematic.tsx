@@ -8,25 +8,17 @@ import { useApi } from "@/lib/api";
 import { cx, fmtNum, fmtSim, fmtZ } from "@/lib/format";
 import { useApp } from "@/lib/store";
 import { Sparkline } from "./charts/Sparkline";
+import type { SensorState } from "./twin/sensors";
 import { Badge, SimulatedTag } from "./ui";
 
-export interface SensorState {
-  sensor_id: string; kind: string; location: string; schematic: { x: number; y: number; label: string } | null;
-  feature: string; feature_label: string; unit: string; latest: number | null; latest_time: string; z: number | null;
-  exceeding: boolean; quality: string; quality_detail: string; detection_sensor: boolean; baseline_median: number | null;
-  baseline_version: string; baseline_status: string; trend: (number | null)[]; trend_quality: string[];
-  incident_role: "primary" | "corroborating" | null; incident_id: string | null;
-  anomaly_interval: { onset: string; last: string } | null; evidence: { ref_id: string; title: string; summary: string }[];
-}
+export type { SensorState } from "./twin/sensors";
 interface SensorsResp { asset_id: string; cursor: string; sensors: SensorState[]; open_incident: string | null }
 
 type Cat = "anomaly" | "corroborating" | "quality" | "exceeding" | "normal" | "context";
 function category(s: SensorState): Cat {
-  if (s.quality !== "ok") return "quality";
-  if (s.incident_role === "primary") return "anomaly";
-  if (s.incident_role === "corroborating") return "corroborating";
-  if (!s.detection_sensor) return "context";
-  if (s.exceeding) return "exceeding";
+  if (s.state === "data_quality") return "quality";
+  if (s.state === "investigate" || s.state === "escalation") return s.incident_role === "primary" ? "anomaly" : "corroborating";
+  if (s.state === "observation") return s.detection_sensor ? "exceeding" : "context";
   return "normal";
 }
 const CAT_LABEL: Record<Cat, string> = {
@@ -159,7 +151,7 @@ function SensorPanel({ s }: { s: SensorState }) {
         </div>
       )}
       <div className="mt-4 flex flex-wrap gap-2">
-        <Link href={`/assets/BRG-017?sensor=${s.sensor_id}&feature=${s.feature}`} className="inline-flex h-8 items-center gap-1 rounded-md border border-line bg-surface px-3 text-xs text-text hover:border-faint">
+        <Link href={`/assets/BRG-017/telemetry?sensor=${s.sensor_id}&feature=${s.feature}`} className="inline-flex h-8 items-center gap-1 rounded-md border border-line bg-surface px-3 text-xs text-text hover:border-faint">
           Time-series chart <ArrowUpRight size={12} />
         </Link>
         {s.incident_id && (

@@ -73,6 +73,24 @@ CREATE TABLE IF NOT EXISTS replay_runs (
   replay_id TEXT PRIMARY KEY, incident_id TEXT NOT NULL, created_at TEXT NOT NULL, status TEXT NOT NULL,
   json TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS work_order_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, sim_time TEXT, work_order_id TEXT NOT NULL,
+  incident_id TEXT NOT NULL, actor TEXT NOT NULL, actor_role TEXT, action TEXT NOT NULL, summary TEXT NOT NULL,
+  detail_json TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_wo_events ON work_order_events(work_order_id, id);
+CREATE TRIGGER IF NOT EXISTS wo_events_no_update BEFORE UPDATE ON work_order_events
+  BEGIN SELECT RAISE(ABORT, 'work_order_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS wo_events_no_delete BEFORE DELETE ON work_order_events
+  BEGIN SELECT RAISE(ABORT, 'work_order_events is append-only'); END;
+CREATE TABLE IF NOT EXISTS work_order_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, sim_time TEXT, work_order_id TEXT NOT NULL,
+  incident_id TEXT NOT NULL, actor TEXT NOT NULL, actor_role TEXT, action TEXT NOT NULL, summary TEXT NOT NULL,
+  detail_json TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_wo_events ON work_order_events(work_order_id, id);
+CREATE TRIGGER IF NOT EXISTS wo_events_no_update BEFORE UPDATE ON work_order_events
+  BEGIN SELECT RAISE(ABORT, 'work_order_events is append-only'); END;
+CREATE TRIGGER IF NOT EXISTS wo_events_no_delete BEFORE DELETE ON work_order_events
+  BEGIN SELECT RAISE(ABORT, 'work_order_events is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_events
   BEGIN SELECT RAISE(ABORT, 'audit_events is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit_events
@@ -101,6 +119,18 @@ class Database:
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.lock = threading.RLock()
         self.conn.executescript(SCHEMA)
+        # at most one live (non-rejected) work order per incident: a second one for the same event is refused by the database
+        try:
+            self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_wo_one_live_per_incident ON work_orders(incident_id) "
+                              "WHERE status != 'rejected'")
+        except sqlite3.IntegrityError:
+            pass  # legacy data from an earlier version already contains duplicates; the engine still checks in code
+        # at most one live (non-rejected) work order per incident: a second one for the same event is refused by the database
+        try:
+            self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_wo_one_live_per_incident ON work_orders(incident_id) "
+                              "WHERE status != 'rejected'")
+        except sqlite3.IntegrityError:
+            pass  # legacy data from an earlier version already contains duplicates; the engine still checks in code
 
     # -- generic helpers --------------------------------------------------------------
     def execute(self, sql: str, params: tuple | dict = ()) -> sqlite3.Cursor:

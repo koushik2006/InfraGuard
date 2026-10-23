@@ -68,5 +68,5 @@ FIXTURES: dict[str, dict[str, list[dict]]] = {
 SENSOR_FEATURE_LABELS = {
     "rms": "RMS acceleration", "peak": "peak acceleration", "dom_freq": "dominant frequency (1.5-5 Hz band)",
     "tilt": "tilt", "tilt_resid": "temperature-compensated tilt residual", "tilt_slope": "tilt trend slope",
-    "width": "crack width", "temp": "temperature",
+    "width": "crack width", "temp": "temperature", "strain": "strain", "wind": "wind speed",
 }

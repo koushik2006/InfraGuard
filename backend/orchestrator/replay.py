@@ -112,7 +112,7 @@ def replay_incident(db: Database, incident_id: str) -> dict[str, Any]:
                           "recorded": f"{rec_wo.work_order_id} {rec_wo.priority}, {len(rec_wo.steps)} steps",
                           "replayed": f"{wo.work_order_id} {wo.priority}, {len(wo.steps)} steps"})
         for r in wi.get("retriage", []):
-            evu = pipeline.update_event(ev, data, r.get("upto", r["window"]))
+            evu = pipeline.advance_event(ev, data, r.get("upto", r["window"]))[0]
             t = pipeline.retriage(evu, inv, data, r["window"])
             retri.append(t)
             steps.append({"step": "retriage", "label": f"Re-triage at window {r['window']} (owner criterion)",
@@ -131,7 +131,9 @@ def replay_incident(db: Database, incident_id: str) -> dict[str, Any]:
                           "recorded": rec_ver[k].outcome if k < len(rec_ver) else None, "replayed": res.outcome})
 
     recorded = pipeline.decision_fields(rec_event, rec_inv, rec_tri, rec_wo, rec_ver, rec_retri)
-    replayed = pipeline.decision_fields(ev, inv, tri, wo, vers, retri)
+    # incidents recorded before findings existed have none: compare like with like
+    ev_cmp = ev if (ev is None or rec_event.findings) else ev.model_copy(update={"findings": []})
+    replayed = pipeline.decision_fields(ev_cmp, inv, tri, wo, vers, retri)
     diff = pipeline.diff_fields(recorded, replayed)
     for s in steps:
         if "match" not in s:

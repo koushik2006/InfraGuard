@@ -1,6 +1,6 @@
 // Mirrors backend/contracts.py (subset used by the UI).
 export type AssetStatus = "No anomaly detected" | "Investigate" | "Data unavailable" | "Escalation required";
-export type Role = "viewer" | "engineer" | "asset_owner";
+export type Role = "viewer" | "engineer" | "asset_owner" | "maintenance";
 
 export interface SparkPoint { i: number; v: number | null; q: string; x: boolean }
 
@@ -30,7 +30,7 @@ export interface IncidentBrief {
   incident_id: string; asset_id: string; state: string; status_text: string; closed: boolean; escalation: boolean;
   event_id: string; primary_sensor_id: string; top_feature: string; top_z: number; onset_time: string;
   detected_time: string; priority: string | null; timeframe: string | null; work_order_id: string | null;
-  work_order_status: string | null;
+  work_order_status: string | null; findings_count: number;
 }
 
 export interface RunConfig {
@@ -50,7 +50,16 @@ export interface AppState {
 
 export interface FeatureDeviation { feature: string; unit: string; value: number; median: number; scale: number; z: number }
 
+export interface SensorFinding {
+  sensor_id: string; role: "primary" | "corroborating" | "context"; used_for_detection: boolean;
+  component_id: string | null; component_name: string | null; location: string; feature: string; feature_label: string; unit: string;
+  value: number; baseline_median: number; baseline_scale: number; z: number; deviation: number; deviation_pct: number | null;
+  onset_time: string; raised_window: number; raised_time: string; persistence_count: number; persistence_window: number;
+  quality_ok: boolean; trend: (number | null)[]; reason: string;
+}
+
 export interface AnomalyEvent {
+  findings: SensorFinding[];
   event_id: string; asset_id: string; primary_sensor_id: string; deviations: FeatureDeviation[];
   onset_window: number; onset_time: string; detected_window: number; detected_time: string; last_window: number;
   last_time: string; persistence_count: number; persistence_required: number; persistence_window: number;
@@ -75,6 +84,7 @@ export interface Narrative { summary: string; key_points: string[]; citations: s
 export interface Investigation {
   event_id: string; asset_id: string; observations: Claim[]; hypotheses: Hypothesis[]; missing_evidence: string[];
   evidence_refs: EvidenceRef[]; narrative: Narrative; tool_calls: ToolCall[]; rules_version: string;
+  finding_evidence: { sensor_id: string; supports: Claim[]; contradicts: Claim[] }[];
 }
 export interface TriageFactor { name: string; observed: string; points: number; rule: string }
 export interface Triage {
@@ -82,12 +92,28 @@ export interface Triage {
   factors: TriageFactor[]; escalation_required: boolean; escalation_basis: string; insufficient_evidence: boolean;
   insufficient_evidence_reason: string | null; recommended_first_action: string; rules_version: string; disclaimer: string;
   _reason: string; _window: number; _sim_time: string;
+  contributing_findings: { sensor_id: string; component_name: string | null; role: string; feature_label: string; z: number; persistence_count: number; counted_as: string }[];
+  uncertainty: string[];
 }
 export interface PlanStep { order: number; action: string; rationale: string; refs: string[] }
 export interface WorkOrder {
   work_order_id: string; incident_id: string; asset_id: string; priority: string; timeframe: string; reason: string;
   steps: PlanStep[]; required_evidence: string[]; status: string; assigned_to: string | null; plan_text: Narrative; label: string;
+  approved_by: string | null; approved_at: string | null; assignment: Assignment | null; delay_reason: string | null;
+  progress_note: string | null; completion: Completion | null; review: Review | null; escalated_at: string | null;
 }
+export interface Assignment { team: string; person: string; due_date: string; assigned_by: string; assigned_at: string; sim_time: string }
+export interface Completion { note: string; submitted_by: string; submitted_at: string; sim_time: string; attachment: { filename: string; stored_as: string; size: number; sha256: string; content_type: string } | null }
+export interface Review { decision: "verified" | "further_work"; reviewer: string; role: string; reason: string; at: string; sim_time: string }
+export interface NextWorkAction { label: string; by: string; urgent: boolean }
+export interface WorkOrderView { work_order: WorkOrder; overdue: boolean; escalated: boolean; next_action: NextWorkAction; sim_date: string; incident_id: string; asset_id: string; history_count: number }
+export interface WorkOrderRow {
+  work_order_id: string; incident_id: string; asset_id: string; status: string; priority: string; timeframe: string; reason: string;
+  steps_summary: string; assignment: Assignment | null; overdue: boolean; escalated: boolean; next_action: NextWorkAction;
+  incident_state: string; created_at: string; approved_by: string | null; completion_submitted: boolean; reviewed_by: string | null;
+}
+export interface WorkOrderEvent { id: number; ts: string; sim_time: string | null; actor: string; actor_role: string | null; action: string; summary: string; detail: Record<string, unknown> }
+export interface Directory { teams: { id: string; name: string; people: string[] }[]; users: { name: string; role: Role }[]; demo: true }
 export interface Approval {
   approval_id: string; decision: string; actor: string; role: string; note: string; edits: Record<string, unknown> | null;
   timestamp: string; sim_time: string; work_order_id: string;
@@ -112,7 +138,10 @@ export interface IncidentDetail {
   approvals: Approval[]; verifications: Verification[]; agent_runs: AgentRun[]; audit: AuditRow[];
   workflow_inputs: Record<string, unknown>; baseline: Baseline | null;
   asset: { asset_id: string; name: string; type: string }; is_current_run: boolean;
+  staged: boolean; next_stage: NextStage | null;
 }
+
+export interface NextStage { agent: "investigator" | "prioritiser" | "planner"; label: string; running_message: string; expected_state: string }
 
 export interface FeatureBaseline {
   sensor_id: string; feature: string; unit: string; median: number; mad: number; scale: number; n: number;

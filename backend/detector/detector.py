@@ -15,11 +15,13 @@ from typing import Optional
 from backend.baseline.service import compute_baseline, derive_features, feature_baseline
 from backend.contracts import (
     AnomalyEvent, AssetConfig, BaselineConfig, DataQualityGate, FeatureDeviation,
-    OwnerCriterionCheck, QualityFlag, RunConfig, TempModel,
+    OwnerCriterionCheck, QualityFlag, RunConfig, SensorFinding, TempModel,
 )
 from backend.detector.quality import assess_series
 from backend.scenarios.assets import ASSETS, reference_windows
 from backend.scenarios.datasource import get_datasource
+from backend.scenarios.fixtures import SENSOR_FEATURE_LABELS
+import statistics
 
 
 @dataclass
@@ -147,6 +149,117 @@ def input_hash(data: AssetData, upto: int) -> str:
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()[:16]
 
 
+OBSERVATION_FACTOR = 0.7   # context sensors count as "under observation" from 0.7 x the asset's z threshold
+TREND_WINDOWS = 48
+
+
+def _trend(data: AssetData, sid: str, feat: str, i: int) -> list[Optional[float]]:
+    lo = max(0, i - TREND_WINDOWS + 1)
+    return [data.rows[sid][j]["features"].get(feat) if data.flags[sid][j].status == "ok" else None for j in range(lo, i + 1)]
+
+
+def _finding_base(data: AssetData, s, feat: str, i: int, z: float, role: str, onset: int, pers: int, reason: str,
+                  quality_ok: bool) -> Optional[SensorFinding]:
+    fb = feature_baseline(data.baseline, s.sensor_id, feat)
+    v = data.rows[s.sensor_id][i]["features"].get(feat)
+    if fb is None or v is None:
+        return None
+    dev = v - fb.median
+    return SensorFinding(
+        sensor_id=s.sensor_id, role=role, used_for_detection=bool(s.detection_features), component_id=s.component_id,
+        component_name=s.component_name, location=s.location, feature=feat,
+        feature_label=SENSOR_FEATURE_LABELS.get(feat, feat), unit=s.units.get(feat, fb.unit), value=round(v, 5),
+        baseline_median=round(fb.median, 5), baseline_scale=round(fb.scale, 5), z=round(z, 2), deviation=round(dev, 5),
+        deviation_pct=None if fb.median == 0 else round(100.0 * dev / abs(fb.median), 2),
+        onset_time=data.rows[s.sensor_id][onset]["t_start"], raised_window=i, raised_time=data.rows[s.sensor_id][i]["t_end"],
+        persistence_count=pers, persistence_window=data.asset.detection.persistence_windows, quality_ok=quality_ok,
+        trend=_trend(data, s.sensor_id, feat, i), reason=reason)
+
+
+def detection_finding(data: AssetData, sid: str, i: int, role: str) -> Optional[SensorFinding]:
+    """Finding for a sensor that met the persistence + quality rule at window i (values are the window's real features)."""
+    p = data.asset.detection
+    s = next(x for x in data.asset.sensors if x.sensor_id == sid)
+    zs = [(f, z) for f, z in data.z[sid][i].items() if f in s.detection_features and z is not None]
+    if not zs:
+        return None
+    feat, z = max(zs, key=lambda t: abs(t[1]))
+    onset = i
+    while onset - 1 >= data.n_ref and data.exceed[sid][onset - 1]:
+        onset -= 1
+    pers = sum(data.exceed[sid][onset: i + 1])
+    lo = i - p.persistence_windows + 1
+    ok = all(data.flags[sid][j].status == "ok" for j in range(lo, i + 1))
+    fb = feature_baseline(data.baseline, sid, feat)
+    unit = s.units.get(feat, "")
+    reason = (f"{SENSOR_FEATURE_LABELS.get(feat, feat)} {data.rows[sid][i]['features'].get(feat):.4g} {unit} against a baseline of "
+              f"{fb.median:.4g} {unit}: robust z = {z:+.1f} (threshold |z| ≥ {p.z_threshold}). Exceeded in {pers} window(s) since "
+              f"{data.rows[sid][onset]['t_start']} (rule: ≥{p.min_exceedances} of {p.persistence_windows}); data-quality gate "
+              f"{'passed' if ok else 'failed'}.")
+    return _finding_base(data, s, feat, i, z, role, onset, pers, reason, ok)
+
+
+def context_finding(data: AssetData, sid: str, onset_event: int, i: int) -> Optional[SensorFinding]:
+    """Supporting observation from a context sensor (not used for detection; it can never raise an alert itself)."""
+    p = data.asset.detection
+    s = next(x for x in data.asset.sensors if x.sensor_id == sid)
+    if s.detection_features or s.kind not in ("strain_gauge", "tiltmeter", "crackmeter"):
+        return None
+    feat = s.features[0]
+    thr = OBSERVATION_FACTOR * p.z_threshold
+    ok_w = [j for j in range(max(data.n_ref, onset_event), i + 1) if data.flags[sid][j].status == "ok" and data.z[sid][j].get(feat) is not None]
+    if not ok_w or data.flags[sid][i].status != "ok" or data.z[sid][i].get(feat) is None:
+        return None
+    zmed = statistics.median(abs(data.z[sid][j][feat]) for j in ok_w)
+    if zmed < thr:
+        return None
+    pers = sum(1 for j in ok_w if abs(data.z[sid][j][feat]) >= thr)
+    reason = (f"Context sensor (not used for detection): median |z| = {zmed:.1f} over the event windows, at or above "
+              f"{OBSERVATION_FACTOR} × the asset threshold ({thr:.2f}). Supporting observation only — it cannot raise an alert.")
+    return _finding_base(data, s, feat, i, data.z[sid][i][feat], "context", ok_w[0], pers, reason, True)
+
+
+def collect_findings(data: AssetData, i: int, primary: str, candidates: list[str], onset_primary: int) -> list[SensorFinding]:
+    """All findings behind one incident at window i: the primary sensor, corroborating detection sensors, context sensors."""
+    out: list[SensorFinding] = []
+    for sid in [primary, *[c for c in candidates if c != primary]]:
+        f = detection_finding(data, sid, i, "primary" if sid == primary else "corroborating")
+        if f:
+            out.append(f)
+    for s in data.asset.sensors:
+        if not s.detection_features:
+            f = context_finding(data, s.sensor_id, onset_primary, i)
+            if f:
+                out.append(f)
+    return out
+
+
+def add_new_findings(event: AnomalyEvent, data: AssetData, upto: int) -> tuple[AnomalyEvent, list[SensorFinding]]:
+    """While an incident is open, sensors that start meeting the rule (or context sensors that start to deviate) are added as
+    further findings of the SAME incident. Existing findings are never rewritten and no second incident is created."""
+    have = {f.sensor_id for f in event.findings}
+    new: list[SensorFinding] = []
+    start = max(data.n_ref, event.detected_window)
+    for sid in data.detection_sensors():
+        if sid in have:
+            continue
+        j0 = next((j for j in range(start, upto + 1) if sensor_triggers(data, sid, j)), None)
+        if j0 is not None:
+            f = detection_finding(data, sid, j0, "corroborating")
+            if f:
+                new.append(f)
+    for s in data.asset.sensors:
+        if not s.detection_features and s.sensor_id not in have:
+            f = context_finding(data, s.sensor_id, event.onset_window, upto)
+            if f:
+                new.append(f)
+    if not new:
+        return event, []
+    det = [f.sensor_id for f in new if f.used_for_detection]
+    return event.model_copy(update={"findings": [*event.findings, *new],
+                                    "corroborating_sensors": [*event.corroborating_sensors, *det]}), new
+
+
 def build_event(data: AssetData, i: int, candidates: list[str], event_id: str, run_id: str) -> AnomalyEvent:
     p = data.asset.detection
     cfg_primary = next(s.sensor_id for s in data.asset.sensors if s.primary)
@@ -191,6 +304,7 @@ def build_event(data: AssetData, i: int, candidates: list[str], event_id: str, r
         z_threshold=p.z_threshold, window_minutes=p.window_minutes, baseline_version=data.baseline.version,
         detection_params=p, owner_criterion=owner_criterion(data, i), scenario_seed=data.run.seed,
         run_id=run_id, input_hash=input_hash(data, i),
+        findings=collect_findings(data, i, primary, candidates, onset),
     )
 
 

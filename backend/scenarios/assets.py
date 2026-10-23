@@ -31,38 +31,77 @@ _REF = dict(start=iso(SIM_START), end=iso(MONITOR_START))
 
 BRIDGE = AssetConfig(
     asset_id="BRG-017",
-    name="Riverside Road Bridge",
+    name="Bridge Alpha",
     type="bridge",
-    location_text="Simulated 3-span girder bridge, 280 m",
+    location_text="Simulated cable-stayed bridge, 280 m",
     criticality="high",
-    description="Simulated three-span steel-concrete girder road bridge with deck accelerometers.",
+    description="Simulated cable-stayed road bridge: deck accelerometers, girder and stay-cable strain, tower tilt, wind and temperature.",
     sensors=[
         SensorConfig(
             sensor_id="ACC-M1", asset_id="BRG-017", kind="accelerometer",
             location="Main span, midspan, downstream girder", sampling_rate_hz=25.0,
             features=["rms", "peak", "dom_freq"], detection_features=["rms", "peak", "dom_freq"],
             units={"rms": "mg", "peak": "mg", "dom_freq": "Hz"}, primary=True,
-            schematic=SchematicPoint(x=500, y=150, label="Midspan"),
+            schematic=SchematicPoint(x=480, y=150, label="Midspan"),
+            component_id="deck_mid", component_name="Deck — main span, midspan",
         ),
         SensorConfig(
             sensor_id="ACC-Q1", asset_id="BRG-017", kind="accelerometer",
             location="Main span, quarter point, downstream girder", sampling_rate_hz=25.0,
             features=["rms", "peak", "dom_freq"], detection_features=["rms", "peak", "dom_freq"],
             units={"rms": "mg", "peak": "mg", "dom_freq": "Hz"},
-            schematic=SchematicPoint(x=420, y=150, label="Quarter span"),
+            schematic=SchematicPoint(x=390, y=150, label="Quarter span"),
+            component_id="deck_q1", component_name="Deck — main span, quarter point",
         ),
         SensorConfig(
             sensor_id="ACC-P2", asset_id="BRG-017", kind="accelerometer",
             location="Main span near Pier 2", sampling_rate_hz=25.0,
             features=["rms", "peak", "dom_freq"], detection_features=["rms", "peak", "dom_freq"],
             units={"rms": "mg", "peak": "mg", "dom_freq": "Hz"},
-            schematic=SchematicPoint(x=640, y=150, label="Near Pier 2"),
+            schematic=SchematicPoint(x=750, y=150, label="Near Pier 2"),
+            component_id="deck_p2", component_name="Deck — main span near Pier 2",
         ),
         SensorConfig(
             sensor_id="TMP-B1", asset_id="BRG-017", kind="temperature",
             location="Deck soffit, span 1", sampling_rate_hz=1 / 60,
             features=["temp"], units={"temp": "°C"},
-            schematic=SchematicPoint(x=220, y=150, label="Deck temp"),
+            schematic=SchematicPoint(x=160, y=150, label="Deck temp"),
+            component_id="deck_s1", component_name="Deck soffit — span 1",
+        ),
+        SensorConfig(
+            sensor_id="STR-G1", asset_id="BRG-017", kind="strain_gauge",
+            location="Main span, midspan girder soffit", sampling_rate_hz=1 / 60,
+            features=["strain"], units={"strain": "µε"},
+            schematic=SchematicPoint(x=570, y=150, label="Girder strain"),
+            component_id="girder_mid", component_name="Girder — main span midspan (soffit)",
+        ),
+        SensorConfig(
+            sensor_id="STR-C1", asset_id="BRG-017", kind="strain_gauge",
+            location="Stay cable C-6, tower 2, downstream plane", sampling_rate_hz=1 / 60,
+            features=["strain"], units={"strain": "µε"},
+            schematic=SchematicPoint(x=660, y=150, label="Cable strain"),
+            component_id="cable_c6", component_name="Stay cable C-6 (tower 2, downstream)",
+        ),
+        SensorConfig(
+            sensor_id="TLT-T1", asset_id="BRG-017", kind="tiltmeter",
+            location="Tower 2, upper shaft", sampling_rate_hz=1 / 60,
+            features=["tilt"], units={"tilt": "mrad"},
+            schematic=SchematicPoint(x=850, y=150, label="Tower tilt"),
+            component_id="tower_2", component_name="Tower 2 — upper shaft",
+        ),
+        SensorConfig(
+            sensor_id="TLT-P2", asset_id="BRG-017", kind="tiltmeter",
+            location="Pier 2 shaft (tower support), upstream face", sampling_rate_hz=1 / 60,
+            features=["tilt"], units={"tilt": "mrad"},
+            schematic=SchematicPoint(x=930, y=150, label="Pier tilt"),
+            component_id="pier_2", component_name="Pier 2 — shaft",
+        ),
+        SensorConfig(
+            sensor_id="WND-1", asset_id="BRG-017", kind="anemometer",
+            location="Tower 1 top, 24 m above deck", sampling_rate_hz=1 / 60,
+            features=["wind"], units={"wind": "m/s"},
+            schematic=SchematicPoint(x=290, y=150, label="Wind"),
+            component_id="tower_1_top", component_name="Tower 1 — top (anemometer mount)",
         ),
     ],
     reference_period=ReferencePeriod(
@@ -73,8 +112,9 @@ BRIDGE = AssetConfig(
     detection=DetectionParams(
         z_threshold=3.5, persistence_windows=3, min_exceedances=3, window_minutes=15,
         min_reference_windows=96,
-        min_scale={"rms": 0.05, "peak": 0.2, "dom_freq": 0.005},
-        plausible_range={"rms": (0.0, 500.0), "peak": (0.0, 3000.0), "dom_freq": (0.5, 12.0), "temp": (-30.0, 70.0)},
+        min_scale={"rms": 0.05, "peak": 0.2, "dom_freq": 0.005, "strain": 0.05, "tilt": 0.002, "wind": 0.05},
+        plausible_range={"rms": (0.0, 500.0), "peak": (0.0, 3000.0), "dom_freq": (0.5, 12.0), "temp": (-30.0, 70.0),
+                        "strain": (-3000.0, 3000.0), "tilt": (-20.0, 20.0), "wind": (0.0, 80.0)},
     ),
     thresholds=[],
 )
@@ -164,6 +204,10 @@ RETAINING_WALL = AssetConfig(
 )
 
 ASSETS: dict[str, AssetConfig] = {a.asset_id: a for a in (BRIDGE, BUILDING, RETAINING_WALL)}
+
+# Assets that are monitored and shown in this version. The building and retaining wall stay defined (config,
+# generators, tests) but are inactive; enabling one is a change to this list, not a redesign.
+ACTIVE_ASSET_IDS: list[str] = ["BRG-017"]
 
 # Labelled simulated events used for detection metrics (ground truth of the simulation only).
 LABELLED_EVENTS = {

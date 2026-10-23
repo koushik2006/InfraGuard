@@ -169,3 +169,19 @@ body {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Digital-twin marker pulse for flagged sensors (restrained; disabled under reduced motion) */
+@keyframes twin-ping {
+  0% { transform: scale(1); opacity: 0.7; }
+  80%, 100% { transform: scale(1.9); opacity: 0; }
+}
+.twin-ping { animation: twin-ping 1.8s ease-out infinite; }
+
+/* Keeps overlays on the always-dark 3D viewport readable when the app is in the light theme. */
+.force-dark {
+  --bg: #0e1116; --surface: #151a22; --raised: #1c2330; --line: #2a3342; --line-soft: #212937;
+  --text: #e8edf4; --muted: #8b97a8; --faint: #5d6878;
+  --blue: #4c8dff; --blue-soft: rgba(76, 141, 255, 0.14); --amber: #ffb020; --amber-soft: rgba(255, 176, 32, 0.14);
+  --red: #ff5a47; --violet: #a78bfa; --violet-soft: rgba(167, 139, 250, 0.15); --slate: #6b7685;
+  color: var(--text);
+}

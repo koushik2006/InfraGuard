@@ -95,6 +95,12 @@ def update_event(event: AnomalyEvent, data: AssetData, upto: int) -> AnomalyEven
         "owner_criterion": owner_criterion(data, upto)})
 
 
+def advance_event(event: AnomalyEvent, data: AssetData, upto: int) -> tuple[AnomalyEvent, list]:
+    """update_event + any newly contributing findings (same incident, never a duplicate)."""
+    from backend.detector.detector import add_new_findings
+    return add_new_findings(update_event(event, data, upto), data, upto)
+
+
 def retriage(event: AnomalyEvent, inv: InvestigationResult, data: AssetData, window: int) -> TriageResult:
     return prioritise(event, inv, data, criterion=owner_criterion(data, window))
 
@@ -127,6 +133,8 @@ def decision_fields(event: Optional[AnomalyEvent], inv: Optional[InvestigationRe
             "detection.input_hash": event.input_hash,
             "detection.change_point_window": event.change_point_window,
         })
+        if event.findings:
+            d["detection.findings"] = [f"{f.sensor_id}:{f.role}" for f in event.findings]
     if inv:
         for h in inv.hypotheses:
             d[f"hypothesis.{h.key}.support"] = h.support

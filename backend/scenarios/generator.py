@@ -96,7 +96,7 @@ def _bridge_windows(seed: int, times: list[datetime], dev_ramp: list[float], tru
     rng = _rng(seed, "BRG-017", stream)
     t = np.arange(N_SAMPLES) / FS
     day_offsets = rng.normal(0.0, 1.2, size=16)
-    out: dict[str, list[dict]] = {s: [] for s in ("ACC-M1", "ACC-Q1", "ACC-P2", "TMP-B1")}
+    out: dict[str, list[dict]] = {s: [] for s in ("ACC-M1", "ACC-Q1", "ACC-P2", "TMP-B1", "STR-G1", "STR-C1", "TLT-T1", "TLT-P2", "WND-1")}
     env: list[dict] = []
     for i, ts in enumerate(times):
         h = _hour(ts + timedelta(minutes=7.5))
@@ -123,7 +123,29 @@ def _bridge_windows(seed: int, times: list[datetime], dev_ramp: list[float], tru
         out["TMP-B1"].append({"temp": round(float(temp), 3)})
         env.append({"temperature_c": round(float(temp), 2), "traffic_index": round(float(tf), 3),
                     "heavy_vehicle": bool(truck[i])})
+    _bridge_context_sensors(seed, stream, out, env, dev_ramp, truck)
     return out, env
+
+
+def _bridge_context_sensors(seed: int, stream: str, out: dict, env: list[dict], dev_ramp: list[float],
+                            truck: list[bool]) -> None:
+    """Context sensors (tower tilt, girder/cable strain, wind). Drawn from their own RNG stream so the
+    original vibration/temperature scenario is bit-for-bit unchanged. They inform the investigation but
+    are not used for detection."""
+    rng = _rng(seed, "BRG-017", stream + ":context")
+    wind = 4.5
+    for i, e in enumerate(env):
+        temp, tf = e["temperature_c"], e["traffic_index"]
+        wind = float(np.clip(0.94 * wind + 0.06 * 4.5 + rng.normal(0.0, 0.55), 0.3, 22.0))
+        e["wind_ms"] = round(wind, 2)
+        out["WND-1"].append({"wind": round(wind, 2)})
+        out["TLT-T1"].append({"tilt": round(0.12 + 0.006 * (temp - 22.0) + 0.0008 * wind + rng.normal(0, 0.004), 5)})
+        # girder strain follows traffic and temperature; a persistent stiffness change adds a small shift
+        g = 42.0 + 2.4 * tf + 0.9 * (temp - 22.0) + 15.0 * dev_ramp[i] + 30.0 * truck[i] + rng.normal(0, 0.6)
+        out["STR-G1"].append({"strain": round(float(g), 3)})
+        out["TLT-P2"].append({"tilt": round(0.05 + 0.003 * (temp - 22.0) + rng.normal(0, 0.003), 5)})
+        c = 118.0 + 1.1 * tf + 0.5 * (temp - 22.0) + rng.normal(0, 0.5)
+        out["STR-C1"].append({"strain": round(float(c), 3)})
 
 
 # ---------------------------------------------------------------------------

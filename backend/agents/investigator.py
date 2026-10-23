@@ -10,7 +10,7 @@ import numpy as np
 
 from backend.agents.base import EvidenceBook, ToolRecorder
 from backend.baseline.service import feature_baseline
-from backend.contracts import AnomalyEvent, Claim, Hypothesis, InvestigationResult, NarrativeDraft
+from backend.contracts import AnomalyEvent, Claim, FindingEvidence, Hypothesis, InvestigationResult, NarrativeDraft
 from backend.detector.detector import AssetData
 from backend.llm.client import draft
 from backend.scenarios.assets import parse_iso
@@ -80,6 +80,29 @@ def investigate(event: AnomalyEvent, data: AssetData, prior_events: list[dict]) 
                                   title=f"{sid} window features, windows {lo}–{hi}",
                                   summary=f"Max |z| = {zmax:.1f} over the same windows.", timestamp=rows[0]["t_start"],
                                   data={"max_abs_z": round(zmax, 2)})
+
+    # context sensors (strain, tilt, ...) that are not used for detection but add supporting context
+    ctx_obs: list[Claim] = []
+    ctx_refs: dict[str, str] = {}
+    for s in asset.sensors:
+        if s.detection_features or s.kind not in ("strain_gauge", "tiltmeter", "crackmeter"):
+            continue
+        cf = s.features[0]
+        zs = [abs(z) for i in range(lo, hi + 1) if data.flags[s.sensor_id][i].status == "ok"
+              and (z := data.z[s.sensor_id][i].get(cf)) is not None]
+        if not zs:
+            continue
+        zmed = float(np.median(zs))
+        ref = book.add(kind="reading_window", source_id=f"{s.sensor_id}[{lo}-{hi}]",
+                       title=f"{s.sensor_id} (context) {SENSOR_FEATURE_LABELS.get(cf, cf)}, windows {lo}–{hi}",
+                       summary=f"Median |z| = {zmed:.1f} over the event windows. Context sensor: not used for detection.",
+                       timestamp=data.rows[s.sensor_id][lo]["t_start"], data={"median_abs_z": round(zmed, 2)})
+        ctx_refs[s.sensor_id] = ref
+        shifted = zmed >= 0.7 * p.z_threshold
+        ctx_obs.append(Claim(kind="observation", refs=[ref], text=(
+            f"Context sensor {s.sensor_id} ({s.location}) "
+            + (f"also shifted (median |z| = {zmed:.1f})." if shifted else f"stayed near its baseline (median |z| = {zmed:.1f}).")
+            + " It is not used for detection.")))
 
     health = rec.call("get_sensor_health", {"asset_id": a_id, "windows": [lo - 8, hi]},
                       lambda: {s.sensor_id: [f.status for f in data.flags[s.sensor_id][max(0, lo - 8): hi + 1]]
@@ -168,6 +191,7 @@ def investigate(event: AnomalyEvent, data: AssetData, prior_events: list[dict]) 
     else:
         obs.append(Claim(kind="observation", refs=[e_health],
                          text="No other sensor on this asset met the persistence rule over the same windows."))
+    obs.extend(ctx_obs)
     if r_corr is not None:
         obs.append(Claim(kind="observation", refs=[e_sens],
                          text=f"In the reference period, {raw_feat} correlated with {driver} at r = {r_corr:+.2f}."))
@@ -304,7 +328,7 @@ def investigate(event: AnomalyEvent, data: AssetData, prior_events: list[dict]) 
         missing.append("Data-quality issues on " + ", ".join(other_issues) + "; their readings are excluded.")
     if asset.type == "bridge":
         missing += ["No weigh-in-motion or traffic-count data for the event windows (only a simulated traffic index).",
-                    "No bearing displacement or strain measurement to separate boundary-condition change from "
+                    "No bearing displacement measurement to separate boundary-condition change from "
                     "stiffness change."]
         if event.persistence_count < 24 * 60 // p.window_minutes:
             missing.append("Deviation not yet observed through a full day/night (low-traffic) cycle.")
@@ -316,6 +340,39 @@ def investigate(event: AnomalyEvent, data: AssetData, prior_events: list[dict]) 
         missing += ["No piezometer data behind the wall."]
     if not event.corroborating_sensors:
         missing.append("No second sensor of the same type confirms the deviation.")
+
+    # ---- evidence supporting / contradicting each individual finding (deterministic rules, every claim cited)
+    fev: list[FindingEvidence] = []
+    det_findings = [f for f in event.findings if f.used_for_detection]
+    for f in event.findings:
+        sup: list[Claim] = []
+        con: list[Claim] = []
+        own_ref = e_primary if f.sensor_id == ps else corr_refs.get(f.sensor_id, e_primary)
+        if f.used_for_detection:
+            sup.append(Claim(kind="observation", refs=[own_ref], text=f"Exceeded the threshold in {f.persistence_count} windows since {f.onset_time} (rule ≥{p.min_exceedances} of {p.persistence_windows})."))
+            if f.quality_ok:
+                sup.append(Claim(kind="observation", refs=[e_health], text="Passed the data-quality gate (no missing, stale, frozen or implausible windows)."))
+            else:
+                con.append(Claim(kind="observation", refs=[e_health], text="Data-quality issues were present in the windows used."))
+            others = [o.sensor_id for o in det_findings if o.sensor_id != f.sensor_id]
+            if others:
+                sup.append(Claim(kind="observation", refs=[corr_refs.get(o, e_primary) for o in others][:3], text=f"Corroborated by {', '.join(others)}."))
+            else:
+                con.append(Claim(kind="observation", refs=[e_health], text="No other detection sensor shows the deviation."))
+            if abs(f.z) >= 2 * p.z_threshold:
+                sup.append(Claim(kind="observation", refs=[own_ref], text=f"Magnitude |z| = {abs(f.z):.1f} is at least twice the threshold."))
+            if f.persistence_count <= p.min_exceedances:
+                con.append(Claim(kind="observation", refs=[own_ref], text=f"Only {f.persistence_count} exceeding windows observed so far."))
+            for r in recent_sensor_work:
+                if f.sensor_id in r["tags"]:
+                    con.append(Claim(kind="observation", refs=[rec_refs[r["id"]]], text=f"Sensor work on {f.sensor_id} on {r['date']}: {r['title']}."))
+        else:
+            ref = ctx_refs.get(f.sensor_id, e_primary)
+            sup.append(Claim(kind="observation", refs=[ref], text="Shifted in the same event windows, consistent with the detected change."))
+            con.append(Claim(kind="observation", refs=[ref], text="Context sensor: not used for detection, so it cannot confirm the finding on its own."))
+        if temp_outside:
+            con.append(Claim(kind="observation", refs=[e_env], text="Temperature was outside the reference range, so an environmental cause cannot be excluded."))
+        fev.append(FindingEvidence(sensor_id=f.sensor_id, supports=sup, contradicts=con))
 
     all_ids = [r.ref_id for r in book.refs]
 
@@ -340,7 +397,7 @@ def investigate(event: AnomalyEvent, data: AssetData, prior_events: list[dict]) 
 
     return InvestigationResult(event_id=event.event_id, asset_id=a_id, observations=obs, hypotheses=hyps,
                                missing_evidence=missing, evidence_refs=book.refs, narrative=narrative,
-                               tool_calls=rec.calls, rules_version=INVESTIGATOR_RULES_VERSION)
+                               tool_calls=rec.calls, rules_version=INVESTIGATOR_RULES_VERSION, finding_evidence=fev)
 
 
 HYPOTHESIS_RULES = {

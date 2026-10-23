@@ -45,7 +45,7 @@ export default function ReplayPage() {
   if (!d) return <div className="space-y-4"><Skeleton className="h-16 w-96" /><Skeleton className="h-96" /></div>;
   return (
     <div>
-      <IncidentHeader d={d} right={<Button variant="primary" onClick={run} disabled={busy} data-coach="replay-run"><Play size={15} /> {busy ? "Replaying…" : r ? "Replay again" : "Replay investigation"}</Button>} />
+      <IncidentHeader d={d} trail="Decision replay" right={<Button variant="primary" onClick={run} disabled={busy} data-coach="replay-run"><Play size={15} /> {busy ? "Replaying…" : r ? "Replay again" : "Replay investigation"}</Button>} />
       <div className="mb-5 flex flex-wrap items-center gap-2 rounded-lg border border-line bg-raised px-4 py-3 text-xs text-muted">
         <Lock size={14} className="text-faint" />
         Read-only: re-runs the incident from its recorded seed, inputs, baseline version, detection parameters, fixtures and workflow inputs.
