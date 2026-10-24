@@ -37,10 +37,10 @@ export const DEMO_STEPS: Step[] = [
     body: "Next Step once more: the Response Planner proposes a preventive action. It only proposes — approve or reject it yourself; nothing becomes a live work order without a human decision.",
     route: (s) => { const i = latestIncident(s); return i ? `/incidents/${i}` : "/incidents"; }, highlight: "approve" },
   { title: "5 · Assign accountability",
-    body: "In Work Orders, assign a maintenance team, a responsible person and a due date. Then switch the demo user (top bar) to that person to record progress and submit completion evidence.",
+    body: "In Work Orders the job moves through separate stages. The engineer reviews the report and approves it, then assigns a team, an officer and a due date. Switch the demo user (top bar) to that officer to accept the job, record progress and submit a note with a PDF.",
     route: (s) => { const w = latestWorkOrder(s); return w ? `/work-orders/${w}` : "/work-orders"; }, highlight: "assign" },
-  { title: "6 · Verify completion",
-    body: "Completion evidence moves the work order to Awaiting Verification — never straight to Verified. A reviewer verifies it or requests further work; every step is in View Activity History.",
+  { title: "6 · Approve the evidence",
+    body: "Submitted evidence moves the order to engineer approval, never straight to complete. The engineer opens the PDF and selects Approve Evidence or Request Further Work. Then return to the 3D model and open the Audit Trail for the chain of custody.",
     route: (s) => { const w = latestWorkOrder(s); return w ? `/work-orders/${w}` : "/work-orders"; }, highlight: "verify" },
 ];
 

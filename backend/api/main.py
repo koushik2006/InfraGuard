@@ -9,7 +9,7 @@ from typing import Any, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from backend.agents.investigator import HYPOTHESIS_RULES
@@ -20,7 +20,8 @@ from backend.contracts import ApprovalRequest
 from backend.db.database import Database, loads
 from backend.detector.detector import transient_exceedances
 from backend.llm import client as llm
-from backend.orchestrator.engine import Engine, WorkflowError
+from backend.orchestrator.engine import Engine, NotFound, WorkflowError
+from backend.orchestrator.wo_common import ACTION_LABEL
 from backend.orchestrator.replay import replay_incident
 from backend.orchestrator.whatif import replay_whatif, run_whatif
 from backend.scenarios.assets import ASSETS, LABELLED_EVENTS, VARIANTS, iso
@@ -121,21 +122,35 @@ class AssignBody(Actor):
 class ProgressBody(Actor):
     note: str = ""
     delay_reason: str = ""
+    completion_note: str = ""
 
 
-class AttachmentBody(BaseModel):
+class EditBody(Actor):
+    edits: dict[str, Any]
+
+
+class ReasonBody(Actor):
+    reason: str = ""
+
+
+class OpenEvidenceBody(Actor):
+    completion_note: str = ""
+
+
+class AttachBody(Actor):
     filename: str
     content_type: str
     data_base64: str
+    replaces: Optional[str] = None
 
 
 class EvidenceBody(Actor):
     note: str
-    attachment: Optional[AttachmentBody] = None
+    no_attachment_reason: str = ""
 
 
 class ReviewBody(Actor):
-    decision: Literal["verify", "further_work"]
+    decision: Literal["approve", "verify", "further_work"]
     reason: str = ""
 
 
@@ -256,9 +271,36 @@ def sensors(asset_id: str):
     closed_findings = {f["sensor_id"]: f for f in (closed or {}).get("findings", [])}
     thr = d.asset.detection.z_threshold
     obs_thr = round(0.7 * thr, 2)
+    res = engine.resolution_for(asset_id) if not inc else None
+    resolved_rows: dict[str, list[dict]] = {}
+    if res:
+        for r in db.all("SELECT sensor_id, features_json, quality, quality_detail, t_end FROM readings WHERE run_id=? AND asset_id=? AND phase='follow_up' "
+                        "AND incident_id=? AND window_index>=150000 ORDER BY sensor_id, window_index", (engine.run_id, asset_id, res["incident_id"])):
+            resolved_rows.setdefault(r["sensor_id"], []).append({"f": loads(r["features_json"]), "q": r["quality"], "qd": r["quality_detail"], "t": r["t_end"]})
     out = []
     for s in d.asset.sensors:
         sid = s.sensor_id
+        if res and sid in resolved_rows:
+            rows_ = resolved_rows[sid]
+            feat0 = (s.detection_features or s.features)[0]
+            fbr = feature_baseline(d.baseline, sid, feat0)
+            v0 = rows_[0]["f"].get(feat0)
+            z0 = (v0 - fbr.median) / fbr.scale if (v0 is not None and fbr and fbr.scale) else None
+            ok = rows_[0]["q"] == "ok"
+            out.append({
+                "state": "normal" if ok else "data_quality", "finding_kind": None, "finding": None,
+                "state_reason": ("Post-completion simulated reading (the designated recovery scenario): within this sensor's baseline range. This is simulated data, "
+                                 "not a physical measurement, and it does not establish structural safety.") if ok else f"{rows_[0]['q'].capitalize()}: {rows_[0]['qd']}",
+                "component": {"id": s.component_id, "name": s.component_name, "mapped": bool(s.component_id)},
+                "sensor_id": sid, "kind": s.kind, "location": s.location, "schematic": s.schematic.model_dump() if s.schematic else None,
+                "feature": feat0, "feature_label": SENSOR_FEATURE_LABELS.get(feat0, feat0), "unit": s.units.get(feat0, ""),
+                "latest": v0, "latest_time": rows_[0]["t"], "z": z0, "exceeding": False, "quality": rows_[0]["q"], "quality_detail": rows_[0]["qd"],
+                "detection_sensor": bool(s.detection_features), "baseline_median": fbr.median if fbr else None,
+                "baseline_version": d.baseline.version, "baseline_status": d.baseline.status,
+                "trend": [r["f"].get(feat0) for r in rows_], "trend_quality": [r["q"] for r in rows_],
+                "incident_role": None, "incident_id": None, "anomaly_interval": None, "evidence": [], "post_completion": True,
+            })
+            continue
         fnd = findings.get(sid)
         feat = fnd["feature"] if fnd else (s.detection_features or s.features)[0]
         fl = d.flags[sid][upto]
@@ -316,7 +358,11 @@ def sensors(asset_id: str):
     if inc:
         brief = engine._incident_brief(inc)
         incident = {**brief, "findings_count": len(findings), "finding_sensors": list(findings)}
-    return {"asset_id": asset_id, "cursor": iso(engine.cursor), "sensors": out, "environment": env, "incident": incident,
+    post_completion = ({"incident_id": res["incident_id"], "work_order_id": res["work_order_id"], "completed_at": res["resolved_at"], "sim_time": res["sim_time"],
+                 "completed_by": res["resolved_by"], "scenario_start": res["scenario_start"],
+                 "label": "Post-completion — simulated state. Readings come from the designated post-completion scenario, not from physical sensors."}
+                if res and resolved_rows else None)
+    return {"asset_id": asset_id, "cursor": iso(engine.cursor), "sensors": out, "environment": env, "incident": incident, "post_completion": post_completion,
             "reporting": sum(1 for x in out if x["quality"] == "ok"), "total": len(out),
             "open_incident": inc["incident_id"] if inc else None, "status": engine.asset_status(asset_id)}
 
@@ -427,10 +473,7 @@ def work_orders():
 @locked
 def work_order(wo_id: str):
     engine.check_overdue()
-    v = engine.work_order_view(wo_id)
-    w = db.one("SELECT incident_id, asset_id FROM work_orders WHERE work_order_id=?", (wo_id,))
-    return {**v, "incident_id": w["incident_id"], "asset_id": w["asset_id"],
-            "history_count": db.one("SELECT COUNT(*) c FROM work_order_events WHERE work_order_id=?", (wo_id,))["c"]}
+    return engine.work_order_view(wo_id)
 
 
 @app.get("/api/work-orders/{wo_id}/history")
@@ -440,19 +483,63 @@ def work_order_history(wo_id: str):
     return engine.work_order_history(wo_id)
 
 
+@app.post("/api/work-orders/{wo_id}/edit")
+def wo_edit(wo_id: str, b: EditBody):
+    return engine.edit_work_order(wo_id, b.edits, b.actor, b.role)
+
+
 @app.post("/api/work-orders/{wo_id}/assign")
 def wo_assign(wo_id: str, b: AssignBody):
     return engine.assign_work_order(wo_id, b.team, b.person, b.due_date, b.actor, b.role)
 
 
+@app.post("/api/work-orders/{wo_id}/accept")
+def wo_accept(wo_id: str, b: Actor):
+    return engine.accept_assignment(wo_id, b.actor, b.role)
+
+
+@app.post("/api/work-orders/{wo_id}/decline")
+def wo_decline(wo_id: str, b: ReasonBody):
+    return engine.decline_assignment(wo_id, b.reason, b.actor, b.role)
+
+
 @app.post("/api/work-orders/{wo_id}/progress")
 def wo_progress(wo_id: str, b: ProgressBody):
-    return engine.update_progress(wo_id, b.note, b.delay_reason, b.actor, b.role)
+    return engine.update_progress(wo_id, b.note, b.delay_reason, b.actor, b.role, b.completion_note)
+
+
+@app.post("/api/work-orders/{wo_id}/evidence-stage")
+def wo_evidence_stage(wo_id: str, b: OpenEvidenceBody):
+    return engine.open_evidence_stage(wo_id, b.completion_note, b.actor, b.role)
+
+
+@app.post("/api/work-orders/{wo_id}/back-to-execution")
+def wo_back(wo_id: str, b: Actor):
+    return engine.back_to_execution(wo_id, b.actor, b.role)
+
+
+@app.post("/api/work-orders/{wo_id}/attachments")
+def wo_attach(wo_id: str, b: AttachBody):
+    return engine.add_attachment(wo_id, b.filename, b.content_type, b.data_base64, b.actor, b.role, b.replaces)
+
+
+@app.post("/api/work-orders/{wo_id}/attachments/{attachment_id}/remove")
+def wo_attach_remove(wo_id: str, attachment_id: str, b: Actor):
+    return engine.remove_attachment(wo_id, attachment_id, b.actor, b.role)
+
+
+@app.get("/api/work-orders/{wo_id}/attachments/{attachment_id}/file")
+def wo_attachment_file(wo_id: str, attachment_id: str):
+    try:
+        path, name, ctype = engine.attachment_path(wo_id, attachment_id)
+    except WorkflowError as e:
+        raise HTTPException(e.status_code, str(e))
+    return FileResponse(path, media_type=ctype, filename=name, content_disposition_type="inline")
 
 
 @app.post("/api/work-orders/{wo_id}/evidence")
 def wo_evidence(wo_id: str, b: EvidenceBody):
-    return engine.submit_evidence(wo_id, b.note, b.attachment.model_dump() if b.attachment else None, b.actor, b.role)
+    return engine.submit_evidence(wo_id, b.note, b.no_attachment_reason, b.actor, b.role)
 
 
 @app.post("/api/work-orders/{wo_id}/review")
@@ -460,13 +547,31 @@ def wo_review(wo_id: str, b: ReviewBody):
     return engine.review_work_order(wo_id, b.decision, b.reason, b.actor, b.role)
 
 
-@app.get("/api/work-orders/{wo_id}/evidence-file")
-def wo_evidence_file(wo_id: str):
+@app.get("/api/work-orders/{wo_id}/report", response_class=HTMLResponse)
+def wo_report(wo_id: str, version: Optional[int] = None):
+    """Print-ready report (Print / Save as PDF in the browser). Any stored version can be regenerated identically."""
     try:
-        path, att = engine.evidence_path(wo_id)
+        return HTMLResponse(engine.report_html(wo_id, version))
     except WorkflowError as e:
         raise HTTPException(e.status_code, str(e))
-    return FileResponse(path, media_type=att.content_type, filename=att.filename)
+
+
+@app.get("/api/work-orders/{wo_id}/reports")
+@locked
+def wo_reports(wo_id: str):
+    return engine.report_versions(wo_id)
+
+
+@app.get("/api/audit")
+@locked
+def audit_trail(work_order_id: Optional[str] = None, incident_id: Optional[str] = None, actor: Optional[str] = None,
+                action: Optional[str] = None, date_from: Optional[str] = None, date_to: Optional[str] = None,
+                order: Literal["asc", "desc"] = "desc", all_runs: bool = False):
+    """Application-level chain of custody: read-only, newest first by default. (Not a tamper-proof ledger.)"""
+    engine.check_overdue()
+    rows = engine.audit_trail(work_order_id, incident_id, actor, action, date_from, date_to, order, all_runs)
+    return {"order": order, "count": len(rows), "events": rows, "actions": ACTION_LABEL,
+            "actors": sorted({r["actor"] for r in engine.audit_trail(all_runs=all_runs)})}
 
 
 @app.post("/api/incidents/{incident_id}/replay")

@@ -101,16 +101,33 @@ export interface WorkOrder {
   steps: PlanStep[]; required_evidence: string[]; status: string; assigned_to: string | null; plan_text: Narrative; label: string;
   approved_by: string | null; approved_at: string | null; assignment: Assignment | null; delay_reason: string | null;
   progress_note: string | null; completion: Completion | null; review: Review | null; escalated_at: string | null;
+  precautions: string[]; acceptance_criteria: string[]; revision: number; edited_by: string | null; edited_at: string | null;
+  acceptance: { person: string; at: string; sim_time: string } | null; last_decline: { person: string; team: string; reason: string; at: string } | null;
+  evidence_version: number; completion_history: Completion[]; started_at: string | null; completion_draft: string | null;
 }
 export interface Assignment { team: string; person: string; due_date: string; assigned_by: string; assigned_at: string; sim_time: string }
-export interface Completion { note: string; submitted_by: string; submitted_at: string; sim_time: string; attachment: { filename: string; stored_as: string; size: number; sha256: string; content_type: string } | null }
-export interface Review { decision: "verified" | "further_work"; reviewer: string; role: string; reason: string; at: string; sim_time: string }
-export interface NextWorkAction { label: string; by: string; urgent: boolean }
-export interface WorkOrderView { work_order: WorkOrder; overdue: boolean; escalated: boolean; next_action: NextWorkAction; sim_date: string; incident_id: string; asset_id: string; history_count: number }
+export interface Attachment { attachment_id: string | null; filename: string; size: number; sha256: string; content_type: string; uploaded_by: string | null; uploaded_at: string | null; submission_version?: number | null }
+export interface Completion { note: string; submitted_by: string; submitted_at: string; sim_time: string; attachments: Attachment[]; version: number; no_attachment_reason: string | null }
+export interface Review { decision: "verified" | "further_work"; reviewer: string; role: string; reason: string; at: string; sim_time: string; evidence_version: number | null }
+export interface NextWorkAction { label: string; by: string; urgent: boolean; stage: number; stage_label: string }
+export interface ReportVersion { version: number; kind: string; created_at: string; created_by: string; wo_status: string; report_id: string }
+export interface WorkOrderView {
+  work_order: WorkOrder; overdue: boolean; escalated: boolean; next_action: NextWorkAction; sim_date: string; incident_id: string; asset_id: string; history_count: number;
+  incident_state: string | null; investigation_completed: boolean; pending_attachments: Attachment[]; reports: ReportVersion[];
+  resolution: { incident_id: string; work_order_id: string; mode: string } | null;
+  limits: { max_upload_bytes: number; allowed_types: string[]; max_files: number };
+}
+export interface AuditEvent {
+  event_id: string; source: "work_order" | "investigation"; work_order_id: string | null; incident_id: string; action: string; action_label: string; actor: string;
+  actor_role: string | null; ts: string; sim_time: string | null; before: string | null; after: string | null; summary: string;
+  refs: { report_version?: number; attachments?: string[]; evidence_version?: number }; detail: Record<string, unknown>;
+}
+export interface AuditResp { order: "asc" | "desc"; count: number; events: AuditEvent[]; actions: Record<string, string>; actors: string[] }
 export interface WorkOrderRow {
   work_order_id: string; incident_id: string; asset_id: string; status: string; priority: string; timeframe: string; reason: string;
   steps_summary: string; assignment: Assignment | null; overdue: boolean; escalated: boolean; next_action: NextWorkAction;
   incident_state: string; created_at: string; approved_by: string | null; completion_submitted: boolean; reviewed_by: string | null;
+  stage: number; stage_label: string;
 }
 export interface WorkOrderEvent { id: number; ts: string; sim_time: string | null; actor: string; actor_role: string | null; action: string; summary: string; detail: Record<string, unknown> }
 export interface Directory { teams: { id: string; name: string; people: string[] }[]; users: { name: string; role: Role }[]; demo: true }

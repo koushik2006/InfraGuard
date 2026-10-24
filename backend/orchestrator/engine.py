@@ -22,6 +22,10 @@ from backend.db.database import Database, dumps, loads, now_iso
 from backend.detector.detector import AssetData, prepare_asset, transient_exceedances
 from backend.detector.quality import sensor_health
 from backend.orchestrator import pipeline
+from backend.orchestrator.accountability import AccountabilityMixin
+from backend.orchestrator.wo_common import (  # noqa: F401  (re-exported for the API and tests)
+    APPROVER_ROLES, EVIDENCE_TYPES, LIVE_WO, MAX_EVIDENCE_BYTES, WORK_ROLES, AccessDenied, NotFound, WorkflowError,
+)
 from backend.scenarios.directory import TEAMS, valid_assignment
 from backend.scenarios.assets import (
     ACTIVE_ASSET_IDS, ASSETS, DEFAULT_VARIANTS, MONITOR_START, SIM_END, SIM_START, VARIANTS, iso, parse_iso,
@@ -60,28 +64,11 @@ STATE_TEXT = {
     "CLOSED_BY_HUMAN": "Closed by human reviewer",
 }
 FOLLOW_UP_ALLOWED = {"APPROVED", "MONITORING_PERSISTS", "MONITORING_IMPROVED", "CANNOT_ASSESS"}
-APPROVER_ROLES = {"engineer", "asset_owner"}
-WORK_ROLES = {"maintenance", "engineer", "asset_owner"}
-MAX_EVIDENCE_BYTES = 3 * 1024 * 1024
-EVIDENCE_TYPES = {"image/png": ".png", "image/jpeg": ".jpg", "application/pdf": ".pdf", "text/plain": ".txt"}
-LIVE_WO = ("assigned", "in_progress", "returned")
 AGENT_LABEL = {"sentinel": "Sentinel", "investigator": "Investigator", "prioritiser": "Risk Prioritiser",
                "planner": "Response Planner", "verifier": "Verifier"}
 
 
-class WorkflowError(Exception):
-    status_code = 409
-
-
-class AccessDenied(WorkflowError):
-    status_code = 403
-
-
-class NotFound(WorkflowError):
-    status_code = 404
-
-
-class Engine:
+class Engine(AccountabilityMixin):
     def __init__(self, db: Database, active_assets: Optional[list[str]] = None, staged: bool = False):
         self.db = db
         # staged: after the Sentinel the user advances the agents one stage at a time ("Continue to next step")
@@ -505,8 +492,10 @@ class Engine:
             raise WorkflowError(f"Incident already has a live work order ({live['work_order_id']}); duplicates are not allowed")
         self.db.execute("INSERT OR REPLACE INTO work_orders VALUES (?,?,?,?,?,?,?)",
                         (wo.work_order_id, wo.incident_id, wo.asset_id, wo.status, dumps(wo), t, t))
+        ver = self._new_report(wo, "draft", "Response Planner")
         self._wo_event(wo, "proposed", "Response Planner", "agent",
-                       f"Proposed by the Response Planner ({wo.priority}, {wo.timeframe}) — pending approval", actor_type="agent")
+                       f"Proposed by the Response Planner ({wo.priority}, {wo.timeframe}) — pending engineer approval", actor_type="agent",
+                       before=None, after="proposed", refs={"report_version": ver})
 
     def _update_open_incident(self, inc: dict, upto: int) -> None:
         d = self.data[inc["asset_id"]]
@@ -586,59 +575,6 @@ class Engine:
         if role not in allowed:
             raise AccessDenied(f"Role '{role}' may not {action}. Allowed: {sorted(allowed)}")
 
-    def decide(self, incident_id: str, req: ApprovalRequest) -> dict:
-        with self.lock:
-            self._require_role(req.role, APPROVER_ROLES, "approve or reject work orders")
-            inc = self.db.one("SELECT * FROM incidents WHERE incident_id=?", (incident_id,))
-            if not inc:
-                raise NotFound(incident_id)
-            if inc["state"] != "AWAITING_APPROVAL":
-                raise WorkflowError(f"Incident is in state {inc['state']}; no proposal is awaiting review "
-                                    f"(duplicate approvals are not allowed)")
-            wo_row = self.db.one("SELECT * FROM work_orders WHERE incident_id=? AND status='proposed' "
-                                 "ORDER BY created_at DESC", (incident_id,))
-            wo = WorkOrderDraft.model_validate(loads(wo_row["json"]))
-            approval_id = self.db.next_id("approval", "APR")
-            edits = req.edits or {}
-            if req.decision == "reject":
-                wo = wo.model_copy(update={"status": "rejected"})
-                to = "REJECTED"
-            else:
-                upd: dict[str, Any] = {"status": "approved", "approved_by": req.actor, "approved_at": now_iso(),
-                                       "label": "Approved work order — assign responsibility"}
-                if req.decision == "edit_approve":
-                    allowed = {"timeframe", "assigned_to", "steps", "reason"}
-                    bad = set(edits) - allowed
-                    if bad:
-                        raise WorkflowError(f"Fields not editable: {sorted(bad)}")
-                    if "steps" in edits:
-                        upd["steps"] = [wo.steps[i].model_copy(update={"action": str(a)}) if i < len(wo.steps) else
-                                        PlanStep(order=i + 1, action=str(a), rationale="Added by reviewer")
-                                        for i, a in enumerate(edits["steps"]) if str(a).strip()]
-                    for k in ("timeframe", "assigned_to", "reason"):
-                        if k in edits:
-                            upd[k] = edits[k]
-                wo = wo.model_copy(update=upd)
-                to = "APPROVED"
-            rec = ApprovalRecord(approval_id=approval_id, incident_id=incident_id, work_order_id=wo.work_order_id,
-                                 decision=req.decision, actor=req.actor, role=req.role, note=req.note,
-                                 edits=edits or None, timestamp=now_iso(), sim_time=iso(self.cursor))
-            self.db.execute("INSERT INTO approvals VALUES (?,?,?,?,?,?,?,?,?)",
-                            (approval_id, incident_id, wo.work_order_id, inc["asset_id"], req.decision, req.actor,
-                             req.role, dumps(rec), rec.timestamp))
-            self.db.execute("UPDATE work_orders SET status=?, json=?, updated_at=? WHERE work_order_id=?",
-                            (wo.status, dumps(wo), now_iso(), wo.work_order_id))
-            verb = {"approve": "approved", "edit_approve": "edited and approved", "reject": "rejected"}[req.decision]
-            self.db.audit(action=f"work_order_{req.decision}", actor=req.actor, actor_type="human", run_id=inc["run_id"],
-                          incident_id=incident_id, asset_id=inc["asset_id"], sim_time=iso(self.cursor),
-                          summary=f"{req.actor} ({req.role}) {verb} {wo.work_order_id}" + (f": {req.note}" if req.note else ""),
-                          detail={"approval_id": approval_id, "edits": edits})
-            self._wo_event(wo, {"approve": "approved", "edit_approve": "approved_with_edits", "reject": "rejected"}[req.decision],
-                           req.actor, req.role, f"{verb.capitalize()} by {req.actor} ({req.role})" + (f": {req.note}" if req.note else ""),
-                           {"approval_id": approval_id, "priority": wo.priority, "edits": edits or None})
-            self._transition(incident_id, to, req.actor, "human", f"Human decision: {verb}")
-            return {"approval": rec.model_dump(), "work_order": wo.model_dump()}
-
     def replan(self, incident_id: str, actor: str, role: str) -> dict:
         with self.lock:
             self._require_role(role, APPROVER_ROLES, "request a re-plan")
@@ -680,13 +616,22 @@ class Engine:
                         (wo.status, dumps(wo), now_iso(), wo.work_order_id))
 
     def _wo_event(self, wo: WorkOrderDraft, action: str, actor: str, role: str, summary: str,
-                  detail: Optional[dict] = None, actor_type: str = "human") -> None:
-        """Append-only accountability record (who / what / when) mirrored into the audit trail."""
+                  detail: Optional[dict] = None, actor_type: str = "human", before: Optional[str] = None,
+                  after: Optional[str] = None, refs: Optional[dict] = None) -> None:
+        """Append-only accountability record (who / what / when / state before and after / references), mirrored into the audit trail.
+        Always called AFTER the change has succeeded, so a failed action is never recorded as a successful one."""
+        d = dict(detail or {})
+        if before is not None:
+            d["before"] = before
+        if after is not None:
+            d["after"] = after
+        if refs:
+            d["refs"] = refs
         self.db.execute("INSERT INTO work_order_events(ts, sim_time, work_order_id, incident_id, actor, actor_role, action, summary, "
                         "detail_json) VALUES (?,?,?,?,?,?,?,?,?)",
-                        (now_iso(), iso(self.cursor), wo.work_order_id, wo.incident_id, actor, role, action, summary, dumps(detail or {})))
+                        (now_iso(), iso(self.cursor), wo.work_order_id, wo.incident_id, actor, role, action, summary, dumps(d)))
         self.db.audit(action=f"wo_{action}", actor=actor, actor_type=actor_type, run_id=self.run_id, incident_id=wo.incident_id,
-                      asset_id=wo.asset_id, sim_time=iso(self.cursor), summary=f"{wo.work_order_id}: {summary}", detail=detail)
+                      asset_id=wo.asset_id, sim_time=iso(self.cursor), summary=f"{wo.work_order_id}: {summary}", detail=d)
 
     def work_order_history(self, wo_id: str) -> list[dict]:
         self._wo(wo_id)
@@ -703,7 +648,7 @@ class Engine:
         """Marks live work past its due date (simulation clock) and records ONE escalation event per due date."""
         with self.lock:
             for r in self.db.all("SELECT w.work_order_id id FROM work_orders w JOIN incidents i ON i.incident_id=w.incident_id "
-                                 "WHERE i.run_id=? AND w.status IN ('assigned','in_progress','returned')", (self.run_id,)):
+                                 "WHERE i.run_id=? AND w.status IN ('assigned','accepted','in_progress','returned','submitting_evidence')", (self.run_id,)):
                 wo = self._wo(r["id"])
                 if not self._overdue(wo):
                     continue
@@ -715,176 +660,6 @@ class Engine:
                                    f"Overdue: due {due}, still {wo.status.replace('_', ' ')}. Escalated to the asset owner (simulated; no message is sent).",
                                    {"due_date": due, "status": wo.status, "responsible": wo.assignment.person}, actor_type="system")  # type: ignore[union-attr]
                     self._save_wo(wo.model_copy(update={"escalated_at": iso(self.cursor)}))
-
-    def _require_assigned_worker(self, wo: WorkOrderDraft, actor: str, role: str, what: str) -> None:
-        self._require_role(role, WORK_ROLES, what)
-        if role == "maintenance" and (not wo.assignment or wo.assignment.person != actor):
-            raise AccessDenied(f"Only the responsible person ({wo.assignment.person if wo.assignment else 'not yet assigned'}) "
-                               f"or an engineer / asset owner may {what}")
-
-    def assign_work_order(self, wo_id: str, team: str, person: str, due_date: str, actor: str, role: str) -> dict:
-        with self.lock:
-            self._require_role(role, APPROVER_ROLES, "assign work orders")
-            wo = self._wo(wo_id)
-            if wo.status not in ("approved", "assigned", "in_progress", "returned"):
-                raise WorkflowError(f"A work order that is '{wo.status}' cannot be assigned (it must be approved by a human first)")
-            if not valid_assignment(team, person):
-                raise WorkflowError("Choose one of the listed demo teams and a person from that team")
-            try:
-                due = date.fromisoformat(due_date)
-            except ValueError:
-                raise WorkflowError("Due date must be a valid date (YYYY-MM-DD)")
-            if due < self._sim_date():
-                raise WorkflowError(f"Due date cannot be before the current simulated date ({self._sim_date().isoformat()})")
-            prev = wo.assignment
-            new = Assignment(team=team, person=person, due_date=due_date, assigned_by=actor, assigned_at=now_iso(), sim_time=iso(self.cursor))
-            status = "assigned" if wo.status in ("approved", "returned") else wo.status
-            wo = wo.model_copy(update={"assignment": new, "assigned_to": person, "status": status, "escalated_at": None if prev and prev.due_date != due_date else wo.escalated_at})
-            self._save_wo(wo)
-            if prev is None:
-                self._wo_event(wo, "assigned", actor, role, f"Assigned to {person} ({team}), due {due_date}, by {actor}",
-                               {"team": team, "person": person, "due_date": due_date})
-            else:
-                if (prev.team, prev.person) != (team, person):
-                    self._wo_event(wo, "reassigned", actor, role, f"Reassigned from {prev.person} ({prev.team}) to {person} ({team}) by {actor}",
-                                   {"previous": prev.model_dump(), "team": team, "person": person, "due_date": due_date})
-                if prev.due_date != due_date:
-                    self._wo_event(wo, "deadline_changed", actor, role, f"Deadline changed from {prev.due_date} to {due_date} by {actor}",
-                                   {"previous_due_date": prev.due_date, "due_date": due_date})
-            return self.work_order_view(wo_id)
-
-    def update_progress(self, wo_id: str, note: str, delay_reason: str, actor: str, role: str) -> dict:
-        with self.lock:
-            wo = self._wo(wo_id)
-            self._require_assigned_worker(wo, actor, role, "update progress")
-            if wo.status not in ("assigned", "in_progress", "returned"):
-                raise WorkflowError(f"Progress cannot be updated while the work order is '{wo.status}'")
-            if not wo.assignment:
-                raise WorkflowError("Assign a team, person and due date first")
-            started = wo.status != "in_progress"
-            wo = wo.model_copy(update={"status": "in_progress", "progress_note": note.strip() or wo.progress_note,
-                                       "delay_reason": delay_reason.strip() or None})
-            self._save_wo(wo)
-            msg = ("Work started" if started else "Progress updated") + f" by {actor}" + (f": {note.strip()}" if note.strip() else "") \
-                + (f" · delay reason: {delay_reason.strip()}" if delay_reason.strip() else "")
-            self._wo_event(wo, "progress_update", actor, role, msg, {"note": note.strip(), "delay_reason": delay_reason.strip()})
-            return self.work_order_view(wo_id)
-
-    def submit_evidence(self, wo_id: str, note: str, attachment: Optional[dict], actor: str, role: str) -> dict:
-        """Real submission: a completion note and an optional file (stored on disk, checksummed). Moves the order to
-        Awaiting Verification only — a human reviewer must verify it."""
-        with self.lock:
-            wo = self._wo(wo_id)
-            self._require_assigned_worker(wo, actor, role, "submit completion evidence")
-            if wo.status not in ("assigned", "in_progress", "returned"):
-                raise WorkflowError(f"Completion evidence cannot be submitted while the work order is '{wo.status}'")
-            if len(note.strip()) < 3:
-                raise WorkflowError("A short completion note is required")
-            att: Optional[Attachment] = None
-            if attachment:
-                ctype = attachment.get("content_type", "")
-                if ctype not in EVIDENCE_TYPES:
-                    raise WorkflowError("Attachment must be a PNG or JPEG photo, a PDF report or a plain-text file")
-                try:
-                    data = base64.b64decode(attachment.get("data_base64", ""), validate=True)
-                except Exception:
-                    raise WorkflowError("Attachment data is not valid base64")
-                if not data or len(data) > MAX_EVIDENCE_BYTES:
-                    raise WorkflowError(f"Attachment must be between 1 byte and {MAX_EVIDENCE_BYTES // (1024 * 1024)} MB")
-                base_name = re.split(r"[\/]", attachment.get("filename", "evidence"))[-1].lstrip(".")
-                safe = re.sub(r"[^A-Za-z0-9._-]", "_", base_name)[:60] or "evidence"
-                folder = self.evidence_dir / wo_id
-                folder.mkdir(parents=True, exist_ok=True)
-                stored = f"{len(list(folder.iterdir())) + 1:02d}_{safe}"
-                (folder / stored).write_bytes(data)
-                att = Attachment(filename=attachment.get("filename", safe), stored_as=stored, size=len(data),
-                                 sha256=hashlib.sha256(data).hexdigest(), content_type=ctype)
-            comp = Completion(note=note.strip(), submitted_by=actor, submitted_at=now_iso(), sim_time=iso(self.cursor), attachment=att)
-            wo = wo.model_copy(update={"status": "awaiting_verification", "completion": comp})
-            self._save_wo(wo)
-            self._wo_event(wo, "completion_evidence_submitted", actor, role,
-                           f"Completion evidence submitted by {actor}: {note.strip()}" + (f" (attachment: {att.filename}, {att.size} bytes)" if att else " (no attachment)"),
-                           {"note": note.strip(), "attachment": att.model_dump() if att else None})
-            return self.work_order_view(wo_id)
-
-    def evidence_path(self, wo_id: str) -> tuple[Path, Attachment]:
-        wo = self._wo(wo_id)
-        if not wo.completion or not wo.completion.attachment:
-            raise NotFound("no attachment")
-        path = (self.evidence_dir / wo_id / wo.completion.attachment.stored_as).resolve()
-        if not str(path).startswith(str((self.evidence_dir / wo_id).resolve())) or not path.exists():
-            raise NotFound("attachment file missing")
-        return path, wo.completion.attachment
-
-    def review_work_order(self, wo_id: str, decision: str, reason: str, actor: str, role: str) -> dict:
-        """Human review of submitted completion: verify, or send back for further work."""
-        with self.lock:
-            self._require_role(role, APPROVER_ROLES, "verify completion or request further work")
-            wo = self._wo(wo_id)
-            if wo.status != "awaiting_verification" or not wo.completion:
-                raise WorkflowError("Only a work order that is awaiting verification (completion evidence submitted) can be reviewed")
-            if actor in (wo.completion.submitted_by, wo.assignment.person if wo.assignment else None):
-                raise AccessDenied("The reviewer must be a different person from the one who did or submitted the work")
-            if decision not in ("verify", "further_work"):
-                raise WorkflowError("decision must be 'verify' or 'further_work'")
-            if decision == "further_work" and len(reason.strip()) < 3:
-                raise WorkflowError("A short reason is required when requesting further work")
-            rv = Review(decision="verified" if decision == "verify" else "further_work", reviewer=actor, role=role,
-                        reason=reason.strip(), at=now_iso(), sim_time=iso(self.cursor))
-            if decision == "verify":
-                wo = wo.model_copy(update={"status": "verified", "review": rv})
-                self._save_wo(wo)
-                self._wo_event(wo, "verified", actor, role, f"Completion verified by {actor} ({role})" + (f": {reason.strip()}" if reason.strip() else ""),
-                               {"reviewer": actor, "reason": reason.strip()})
-                inc = self.db.one("SELECT state FROM incidents WHERE incident_id=?", (wo.incident_id,))
-                if inc and inc["state"] == "APPROVED":
-                    self._transition(wo.incident_id, "CLOSED_BY_HUMAN", actor, "human",
-                                     f"Closed by {actor} after verifying completion of {wo_id}" + (f": {reason.strip()}" if reason.strip() else ""))
-            else:
-                wo = wo.model_copy(update={"status": "returned", "review": rv, "completion": None})
-                self._save_wo(wo)
-                self._wo_event(wo, "further_work_requested", actor, role, f"Further work requested by {actor}: {reason.strip()}",
-                               {"reviewer": actor, "reason": reason.strip(), "returned_completion": rv.model_dump()})
-            return self.work_order_view(wo_id)
-
-    def work_order_next_action(self, wo: WorkOrderDraft, overdue: bool) -> dict:
-        s = wo.status
-        table = {
-            "proposed": ("Approve or reject the proposed action", "engineer / asset owner"),
-            "approved": ("Assign a team, responsible person and due date", "engineer / asset owner"),
-            "assigned": ("Start work and update progress", "assigned person"),
-            "in_progress": ("Submit completion evidence when the work is done", "assigned person"),
-            "returned": (f"Resume work — further work was requested" + (f": {wo.review.reason}" if wo.review else ""), "assigned person"),
-            "awaiting_verification": ("Verify completion or request further work", "reviewer (not the person who did the work)"),
-            "verified": ("None — completion verified", ""),
-            "rejected": ("None — proposal rejected", ""),
-            "completed": ("Legacy status", ""),
-        }
-        label, who = table.get(s, ("", ""))
-        return {"label": label, "by": who, "urgent": s in ("proposed", "awaiting_verification") or overdue}
-
-    def work_order_view(self, wo_id: str) -> dict:
-        wo = self._wo(wo_id)
-        overdue = self._overdue(wo)
-        return {"work_order": wo.model_dump(), "overdue": overdue, "escalated": bool(wo.escalated_at),
-                "next_action": self.work_order_next_action(wo, overdue), "sim_date": self._sim_date().isoformat()}
-
-    def work_order_rows(self) -> list[dict]:
-        self.check_overdue()
-        out = []
-        for w in self.db.all("SELECT * FROM work_orders ORDER BY created_at DESC"):
-            inc = self.db.one("SELECT * FROM incidents WHERE incident_id=?", (w["incident_id"],))
-            if not inc or inc["run_id"] != self.run_id or inc["asset_id"] not in self.active:
-                continue
-            wo = WorkOrderDraft.model_validate(loads(w["json"]))
-            overdue = self._overdue(wo)
-            out.append({"work_order_id": w["work_order_id"], "incident_id": w["incident_id"], "asset_id": w["asset_id"], "status": w["status"],
-                        "priority": wo.priority, "timeframe": wo.timeframe, "reason": wo.reason,
-                        "steps_summary": wo.steps[0].action if wo.steps else "", "assignment": wo.assignment.model_dump() if wo.assignment else None,
-                        "overdue": overdue, "escalated": bool(wo.escalated_at), "next_action": self.work_order_next_action(wo, overdue),
-                        "incident_state": inc["state"], "created_at": w["created_at"], "approved_by": wo.approved_by,
-                        "completion_submitted": bool(wo.completion), "reviewed_by": wo.review.reviewer if wo.review else None})
-        return out
 
     def load_follow_up(self, incident_id: str, follow_up_set: str, actor: str, role: str) -> dict:
         with self.lock:

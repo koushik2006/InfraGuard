@@ -84,9 +84,9 @@ function SensorCard({ s, version, onClose }: { s: SensorState; version: unknown;
           <div><p className="text-faint">Baseline</p><p className="num mt-0.5 text-base font-semibold">{fmtNum(s.baseline_median, 3)}</p></div>
           <div><p className="text-faint"><Term t="robust z-score">z</Term> · calc.</p><p className={cx("num mt-0.5 text-base font-semibold", s.state === "normal" ? "" : "text-amber")}>{fmtZ(s.z)}</p></div>
         </div>
-        {s.state !== "normal" && (
+        {(s.state !== "normal" || s.post_completion) && (
           <div className="rounded-lg border p-2.5 text-xs leading-relaxed" style={{ borderColor: `${m.color}40`, background: `${m.color}10` }}>
-            <p className="mb-0.5 font-semibold" style={{ color: m.color }}>{s.finding_kind ? FINDING_KIND_LABEL[s.finding_kind] : m.label}</p>
+            <p className="mb-0.5 font-semibold" style={{ color: m.color }}>{s.finding_kind ? FINDING_KIND_LABEL[s.finding_kind] : s.post_completion ? "Post-completion (simulated)" : m.label}</p>
             <p>{s.state_reason}</p>
             {f && <p className="num mt-1 text-[11px] text-[#c9d3e0]">Since {fmtSim(f.onset_time)} UTC · {f.persistence_count} of {f.persistence_window} windows</p>}
           </div>
@@ -157,6 +157,17 @@ function Hero({ data, selected, onSelect, onDeselect }: { data: SensorsResp | un
           <Metric label="findings" value={String(brief?.findings_count ?? 0)} tone={brief ? "amber" : undefined} />
           <Metric label="flagged" value={String(flagged)} tone={flagged ? "amber" : undefined} />
         </div>
+        {data?.post_completion && (
+          <div data-testid="post-completion-banner" className="pointer-events-auto rounded-xl border border-blue/40 bg-[rgba(8,22,44,0.85)] p-3 backdrop-blur" role="status">
+            <p className="text-xs font-semibold text-blue">Post-completion — simulated state</p>
+            <p className="mt-1 text-xs text-[#d5dbe6]">Incident {data.post_completion.incident_id} was completed after the engineer approved the evidence for {data.post_completion.work_order_id}. The readings shown come from the designated post-completion scenario, not from physical sensors, and do not by themselves establish that the structure is safe. The original incident stays in the investigation and audit records.</p>
+            <div className="mt-2 flex flex-wrap gap-2">
+              <Link href={`/work-orders/${data.post_completion.work_order_id}`} className="inline-flex h-7 items-center rounded-md border border-blue/50 px-2.5 text-xs font-semibold text-blue">Work order</Link>
+              <Link href={`/incidents/${data.post_completion.incident_id}`} className="inline-flex h-7 items-center rounded-md border border-white/20 px-2.5 text-xs text-[#c9d3e0]">Original investigation</Link>
+              <Link href={`/audit?work_order=${data.post_completion.work_order_id}`} className="inline-flex h-7 items-center rounded-md border border-white/20 px-2.5 text-xs text-[#c9d3e0]">Audit trail</Link>
+            </div>
+          </div>
+        )}
         {inc && (
           <div data-testid="incident-banner" className="pointer-events-auto rounded-xl border border-amber/40 bg-[rgba(40,28,6,0.82)] p-3 backdrop-blur" role="status">
             <p className="flex flex-wrap items-center gap-2 text-xs font-semibold text-amber">

@@ -82,15 +82,24 @@ CREATE TRIGGER IF NOT EXISTS wo_events_no_update BEFORE UPDATE ON work_order_eve
   BEGIN SELECT RAISE(ABORT, 'work_order_events is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS wo_events_no_delete BEFORE DELETE ON work_order_events
   BEGIN SELECT RAISE(ABORT, 'work_order_events is append-only'); END;
-CREATE TABLE IF NOT EXISTS work_order_events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, sim_time TEXT, work_order_id TEXT NOT NULL,
-  incident_id TEXT NOT NULL, actor TEXT NOT NULL, actor_role TEXT, action TEXT NOT NULL, summary TEXT NOT NULL,
-  detail_json TEXT NOT NULL);
-CREATE INDEX IF NOT EXISTS ix_wo_events ON work_order_events(work_order_id, id);
-CREATE TRIGGER IF NOT EXISTS wo_events_no_update BEFORE UPDATE ON work_order_events
-  BEGIN SELECT RAISE(ABORT, 'work_order_events is append-only'); END;
-CREATE TRIGGER IF NOT EXISTS wo_events_no_delete BEFORE DELETE ON work_order_events
-  BEGIN SELECT RAISE(ABORT, 'work_order_events is append-only'); END;
+CREATE TABLE IF NOT EXISTS work_order_attachments (
+  attachment_id TEXT PRIMARY KEY, work_order_id TEXT NOT NULL, incident_id TEXT NOT NULL, filename TEXT NOT NULL,
+  stored_as TEXT NOT NULL, content_type TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL,
+  uploaded_by TEXT NOT NULL, uploaded_role TEXT, uploaded_at TEXT NOT NULL,
+  submission_version INTEGER, removed_at TEXT, removed_by TEXT);
+CREATE INDEX IF NOT EXISTS ix_wo_att ON work_order_attachments(work_order_id);
+CREATE TABLE IF NOT EXISTS work_order_reports (
+  report_id TEXT PRIMARY KEY, work_order_id TEXT NOT NULL, incident_id TEXT NOT NULL, version INTEGER NOT NULL,
+  kind TEXT NOT NULL, created_at TEXT NOT NULL, created_by TEXT NOT NULL, sim_time TEXT, wo_status TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL, UNIQUE (work_order_id, version));
+CREATE TRIGGER IF NOT EXISTS wo_reports_no_update BEFORE UPDATE ON work_order_reports
+  BEGIN SELECT RAISE(ABORT, 'work_order_reports are append-only (new versions are added, never edited)'); END;
+CREATE TRIGGER IF NOT EXISTS wo_reports_no_delete BEFORE DELETE ON work_order_reports
+  BEGIN SELECT RAISE(ABORT, 'work_order_reports are append-only'); END;
+CREATE TABLE IF NOT EXISTS incident_resolutions (
+  incident_id TEXT PRIMARY KEY, work_order_id TEXT NOT NULL, asset_id TEXT NOT NULL, run_id TEXT NOT NULL,
+  resolved_at TEXT NOT NULL, sim_time TEXT NOT NULL, resolved_by TEXT NOT NULL, mode TEXT NOT NULL,
+  scenario_start TEXT NOT NULL, n_windows INTEGER NOT NULL);
 CREATE TRIGGER IF NOT EXISTS audit_no_update BEFORE UPDATE ON audit_events
   BEGIN SELECT RAISE(ABORT, 'audit_events is append-only'); END;
 CREATE TRIGGER IF NOT EXISTS audit_no_delete BEFORE DELETE ON audit_events
@@ -119,12 +128,6 @@ class Database:
         self.conn.execute("PRAGMA foreign_keys=ON")
         self.lock = threading.RLock()
         self.conn.executescript(SCHEMA)
-        # at most one live (non-rejected) work order per incident: a second one for the same event is refused by the database
-        try:
-            self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_wo_one_live_per_incident ON work_orders(incident_id) "
-                              "WHERE status != 'rejected'")
-        except sqlite3.IntegrityError:
-            pass  # legacy data from an earlier version already contains duplicates; the engine still checks in code
         # at most one live (non-rejected) work order per incident: a second one for the same event is refused by the database
         try:
             self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_wo_one_live_per_incident ON work_orders(incident_id) "

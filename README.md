@@ -25,8 +25,10 @@ cd frontend && npm install && cd ..
 cd frontend && npm run dev
 ```
 
-Open http://localhost:3000. Backend tests: `.venv/Scripts/python -m pytest tests -q` (62 tests).
-End-to-end UI journey (needs both servers + Chrome; 74 checks): `cd frontend && node scripts/e2e-check.mjs ../docs/screenshots`.
+Open http://localhost:3000. Backend tests: `.venv/Scripts/python -m pytest tests -q` (70 tests).
+End-to-end UI journey (needs both servers + Chrome; 119 checks): `cd frontend && node scripts/e2e-check.mjs ../docs/screenshots`.
+After restarting the backend, `node scripts/e2e-persist.mjs` re-checks that the completed journey (stage, evidence PDF, reports, audit trail) survived.
+Uploads: `INFRAGUARD_MAX_UPLOAD_MB` (default 5) sets the evidence file-size limit.
 
 Agent execution mode: by default the agents run **one stage at a time** ("Next Step"). Set
 `INFRAGUARD_AGENT_MODE=auto` to run them back to back as before.
@@ -44,8 +46,12 @@ Click **Guided demo** in the top bar, or follow this. Keyboard: `Space` play/pau
 2. **Detect** — at 05 Mar 08:15 a heavy truck spikes peak acceleration for one window: logged as a *transient, no alert*. From 16:00 the dominant frequency drops and stays down: the Sentinel opens **one incident with four findings** (ACC-M1 primary, ACC-Q1 and ACC-P2 corroborating, STR-G1 context). Open the 3D workspace and click a flagged sensor: its mapped component turns red and the panel names it.
 3. **Investigate** — **Open this finding**. Four stages, one at a time (*Step n of 4*, **Previous Step / Next Step**): Sentinel - Detection, Investigator - Evidence, Risk Prioritiser - Assessment, Response Planner - Preventive action.
 4. **Approve** — at stage 4 **Approve** or **Reject** the proposed action. Nothing becomes a live work order without a human decision.
-5. **Assign** — Work Orders, then the order: pick a maintenance team, responsible person and due date. Switch the demo user (top bar) to that person to record progress and submit completion evidence (note + file).
-6. **Verify** — completion evidence moves the order to *Awaiting Verification*, never straight to *Verified*. An engineer / asset owner (not the submitter) clicks **Verify Completion** or **Request Further Work**. **View Activity History** shows every step.
+5. **Engineer review (Stage 1)** — Work Orders, then the order. Read the generated Resource Planner report, edit the tasks / precautions / acceptance criteria, **Save edits** (new report version), then **Approve Work Order** (or **Reject** with a reason).
+6. **Assign (Stage 2)** — pick a maintenance team, responsible officer and due date. Switch the demo user (top bar) to that officer.
+7. **Officer (Stages 3-5)** — read the report and **Accept Assignment** (or **Decline** with a reason, which returns it to the engineer). Record progress, then **Proceed to evidence submission**: write the completion note, **Attach File** (PDF report), review, **Finalise and submit**.
+8. **Engineer approves the evidence (Stage 6)** — open the PDF, then **Approve Evidence** or **Request Further Work** (reason; back to Stage 4). Approval completes the job and the investigation (Stage 7).
+9. **Return to 3D Bridge Model** — a clearly labelled *simulated post-completion state*: normal readings, no active flags. The original incident stays in Investigations.
+10. **Audit Trail** (sidebar) — the chain of custody: who did what, when, state before/after, report and evidence references, with filters.
 
 ## Architecture
 
@@ -60,7 +66,7 @@ backend/
   llm/         the single LLM module: timeout, schema validation, one retry, deterministic fallback
   api/         FastAPI;  evaluation.py  detection metrics
 frontend/      Next.js 16 + Tailwind 4 + Recharts + Framer Motion
-tests/         62 tests
+tests/         70 tests
 ```
 
 Deterministic code owns detection, quality checks, hypothesis scoring, triage, access control and workflow
@@ -69,14 +75,15 @@ event needs ≥k of N exceeding windows (per asset) with all N passing the quali
 hash, status (provisional/validated/insufficient data) and whether the reference period was reviewed — a learned
 baseline is not a safe-state baseline.
 
-Investigation workflow: `DETECTED → INVESTIGATING → PRIORITISING → PLANNING → AWAITING_APPROVAL → APPROVED | REJECTED`.
-Work-order lifecycle (separate, in Work Orders): `proposed → approved → assigned → in_progress → awaiting_verification →
-verified | returned (further work)`; verification closes the incident (`CLOSED_BY_HUMAN`) by a human decision. Invalid
-transitions are rejected by the backend and every valid one is written to the append-only `work_order_events` and
-`audit_events` tables. Roles (enforced by the backend): `engineer` / `asset_owner` approve, assign and review;
-`maintenance` officers record progress and evidence only on orders assigned to them; `viewer` can do none; the reviewer
-can never be the person who submitted the evidence. The Verifier agent and the follow-up-readings capability still exist
-in the backend (`/follow-up`, `/close`) but are no longer part of the main workflow.
+Investigation workflow: `DETECTED → INVESTIGATING → PRIORITISING → PLANNING → AWAITING_APPROVAL → APPROVED | REJECTED`, then
+`CLOSED_BY_HUMAN` ("investigation completed") when an engineer approves the work-order evidence.
+Work-order stages (persisted `status`, enforced by the backend): 1 `proposed` (engineer review) → 2 `approved` (assignment) → 3 `assigned`
+(officer acceptance; decline returns to 2) → 4 `accepted` / `in_progress` / `returned` (work execution) → 5 `submitting_evidence` →
+6 `awaiting_verification` (engineer evidence approval; *Request Further Work* returns to 4) → 7 `verified` (job completed). Roles:
+`engineer` / `asset_owner` edit, approve, assign and review; only the assigned `maintenance` officer accepts, declines, records progress and
+submits evidence; `viewer` can do none; the reviewer can never be the person who did or submitted the work. Every transition is validated in
+`backend/orchestrator/accountability.py` and recorded only after it succeeds. The Verifier agent and follow-up readings still exist in the
+backend (`/follow-up`, `/close`) but are not part of this workflow.
 
 ## Signature features
 
@@ -103,11 +110,29 @@ in the backend (`/follow-up`, `/close`) but are no longer part of the main workf
   via `POST /api/incidents/{id}/advance` (guarded by `expected_state`); progress text appears only while the real request is
   pending and a failure shows the error with **Retry** (a failed stage writes nothing). Completed stages are kept when you
   navigate away or step back.
-* **Work Orders and accountability**: approve / reject, then assign (maintenance team, responsible person, due date; fictional
-  demo teams from `GET /api/directory`), progress updates with optional delay reason, an overdue indicator and a single
-  escalation event (simulated clock), completion evidence (note + uploaded file stored on disk with SHA-256), *Awaiting
-  Verification*, then **Verify Completion** or **Request Further Work** (reason). Reassignment and deadline changes keep the
-  previous record. **View Activity History** is an expandable timeline stored in SQLite (survives refresh and restart).
+* **Work Orders, stage by stage** (`/work-orders/<id>`): one current stage is shown at a time with a completed / current / upcoming indicator;
+  earlier stages stay readable. Stage 1 engineer review (investigation summary, findings, the generated report, editable instructions,
+  Approve / Reject with a required reason), 2 assignment, 3 officer acceptance (Accept / Decline with a reason), 4 work execution (progress,
+  delays, completion-note draft), 5 evidence submission (completion note + **Attach File**: PDF reports, PNG/JPEG photos or text; type, size
+  and content are validated on client **and** server; replace / remove before submitting; review step; duplicates refused), 6 engineer evidence
+  approval (**Approve Evidence** or **Request Further Work**), 7 job completed (links to the final report, evidence and audit trail, and
+  **Return to 3D Bridge Model**). Evidence files are stored under `backend/data/evidence/<work order>/` with SHA-256 and a database record
+  (`work_order_attachments`); resubmission after further work creates evidence version 2 and keeps version 1.
+* **Resource Planner report** (`GET /api/work-orders/<id>/report[?version=n]`): print-ready HTML with InfraGuard branding, sections A-F (header,
+  incident summary, sensor readings and technical evidence, investigation and decisions, work instructions, completion requirements), tables,
+  inline trend charts from the stored findings, and page numbers; **Download / Print PDF** uses the browser's Save-as-PDF because the project has
+  no PDF library. Each version is an immutable snapshot of real application data (`work_order_reports`): draft, each engineer edit, approval,
+  assignment and completion. Unapproved work is labelled "UNAPPROVED SYSTEM RECOMMENDATION"; approved work shows the engineer's wording and a
+  comparison with the system recommendation. Missing information is shown as "Not available", never invented.
+* **Audit Trail / chain of custody** (`/audit`, `GET /api/audit`): a dedicated sidebar page with filters (work order, incident, actor, action,
+  dates), newest/oldest-first toggle, expandable details (event ID, state before/after, reason, report version and evidence-file references; file
+  metadata only), and links to the work order, incident, report and evidence. Events come from the backend state changes (append-only
+  `work_order_events`, mirrored into `audit_events`), survive refresh and restart, and failed actions are not recorded. It is an application-level
+  record, not a tamper-proof ledger.
+* **Post-completion 3D state**: when the engineer approves the evidence the incident is completed and the bridge's designated post-completion scenario (the
+  existing deterministic "improves" reading set, SIMULATED) is persisted (`incident_resolutions`). The 3D model then shows normal sensor states, no
+  incident flags or red highlights, and a banner: *Post-completion — simulated state; not physical measurements; not a safety claim*.
+  The original incident, findings and audit history remain available.
 * **3D bridge**: more realistic geometry (railings, road markings, lamp posts, embankments with approach road, shore, river)
   with real-time shadows. Selecting a finding highlights its **actual mapped component** in red (deck section, girder,
   stay cable, tower, tower top, pier); a normal sensor gets a neutral blue location highlight; no mapping gives "Component
@@ -136,7 +161,9 @@ persist 4 windows). *These results do not show real-world generalisation.*
 * Hypothesis ranking uses documented additive rules, not a statistical model; support labels are heuristic.
 * Follow-up sets (backend / what-if only) are three predefined generators, not user-uploaded data.
 * A work-order *proposal* row exists from the Planner stage but is shown and treated as "pending approval"; it becomes a live order only on human approval. Overdue is evaluated on the simulated clock, not wall time.
-* Evidence upload is base64-in-JSON (up to 3 MB; png/jpeg/pdf/txt), stored on local disk; no virus scanning or object storage.
+* The report is HTML printed to PDF by the browser (page numbers need a recent Chrome/Edge); no server-side PDF generator is bundled. Acceptance criteria and precautions appear only if the engineer enters them.
+* The post-completion 3D state is the simulated recovery scenario; it continues to show that state after later replay steps and is not derived from new measurements.
+* Evidence upload is base64-in-JSON (default limit 5 MB, `INFRAGUARD_MAX_UPLOAD_MB`; pdf/png/jpeg/txt, checked by content signature), stored on local disk; no virus scanning or object storage.
 * Component highlighting uses a fixed sensor-to-component map of the simulated bridge model; it is an explanatory model, not an engineering drawing.
 * The event is the first persistent run per asset; a second distinct event on the same asset while one is open is folded into it.
 * "Change-point" is a single mean-shift estimate; for the building it can precede detection by several windows.

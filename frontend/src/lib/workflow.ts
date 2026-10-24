@@ -18,9 +18,13 @@ export function journeyStep(state: string): number {
 export interface NextAction { label: string; href: string | null; hint: string; tone: "amber" | "blue" | "slate" }
 
 export const WO_STATUS_LABEL: Record<string, string> = {
-  proposed: "Pending approval", approved: "Approved — needs assignment", assigned: "Assigned", in_progress: "In progress",
-  awaiting_verification: "Awaiting verification", verified: "Verified", returned: "Returned for further work", rejected: "Rejected", completed: "Completed (legacy)",
+  proposed: "Pending engineer approval", approved: "Approved — needs assignment", assigned: "Assigned — awaiting acceptance", accepted: "Accepted — work to start",
+  in_progress: "Work in progress", submitting_evidence: "Preparing evidence", awaiting_verification: "Awaiting engineer approval of evidence",
+  verified: "Job completed", returned: "Returned for further work", rejected: "Rejected", completed: "Completed (legacy)",
 };
+
+/** The seven stages of a work order, in order. Each one is a dedicated view inside Work Orders. */
+export const WO_STAGES = ["Engineer review", "Assignment", "Officer acceptance", "Work execution", "Evidence submission", "Evidence approval", "Job completed"] as const;
 
 /** What the user should do next, derived only from backend workflow and work-order state. */
 export function nextAction(i: Pick<IncidentBrief, "state" | "incident_id" | "work_order_id" | "work_order_status">): NextAction {
@@ -34,12 +38,12 @@ export function nextAction(i: Pick<IncidentBrief, "state" | "incident_id" | "wor
     case "REJECTED":
       return { label: "Revise proposal", href: wo, hint: "The proposal was rejected; request a revised one", tone: "amber" };
     case "CLOSED_BY_HUMAN":
-      return { label: "Closed", href: null, hint: "Completion was verified and the incident closed by a human", tone: "slate" };
+      return { label: "Completed", href: wo, hint: "The engineer approved the evidence; investigation completed", tone: "slate" };
     default: {
       const s = i.work_order_status ?? "approved";
       const map: Record<string, [string, NextAction["tone"]]> = {
-        approved: ["Assign responsibility", "amber"], assigned: ["Track progress", "blue"], in_progress: ["Track progress", "blue"],
-        returned: ["Resume work", "amber"], awaiting_verification: ["Verify completion", "amber"], verified: ["Open work order", "slate"],
+        approved: ["Assign responsibility", "amber"], assigned: ["Awaiting officer acceptance", "blue"], accepted: ["Track progress", "blue"], in_progress: ["Track progress", "blue"],
+        submitting_evidence: ["Track progress", "blue"], returned: ["Resume work", "amber"], awaiting_verification: ["Approve evidence", "amber"], verified: ["Open work order", "slate"],
       };
       const [label, tone] = map[s] ?? ["Open work order", "blue"];
       return { label, href: wo, hint: WO_STATUS_LABEL[s] ?? s, tone };
@@ -51,5 +55,5 @@ export const STATE_LABEL: Record<string, string> = {
   DETECTED: "Anomaly detected", INVESTIGATING: "Evidence gathered", PRIORITISING: "Priority assessed", PLANNING: "Drafting proposal",
   AWAITING_APPROVAL: "Awaiting approval", REJECTED: "Proposal rejected", APPROVED: "Approved — tracked in Work Orders",
   VERIFYING: "Verifying", MONITORING_PERSISTS: "Deviation persists", MONITORING_IMPROVED: "Monitoring improved",
-  CANNOT_ASSESS: "Cannot assess", CLOSED_BY_HUMAN: "Closed by human",
+  CANNOT_ASSESS: "Cannot assess", CLOSED_BY_HUMAN: "Investigation completed",
 };

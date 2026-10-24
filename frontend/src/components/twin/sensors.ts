@@ -14,6 +14,7 @@ export interface SensorState {
   incident_role: "primary" | "corroborating" | "context" | null; incident_id: string | null;
   finding_kind: "incident_finding" | "closed_incident" | "transient" | null; finding: SensorFinding | null;
   component: { id: string | null; name: string | null; mapped: boolean };
+  post_completion?: boolean;
   anomaly_interval: { onset: string; last: string } | null; evidence: { ref_id: string; title: string; summary: string }[];
 }
 
@@ -25,6 +26,7 @@ export interface SensorsResp {
   asset_id: string; cursor: string; sensors: SensorState[]; environment: TwinEnvironment; reporting: number; total: number;
   open_incident: string | null; status: string;
   incident: (IncidentBrief & { findings_count: number; finding_sensors: string[] }) | null;
+  post_completion: { incident_id: string; work_order_id: string; completed_at: string; sim_time: string; completed_by: string; label: string } | null;
 }
 
 /** Colours for the always-dark 3D viewport. Green is used only for "reporting" indicators, never for a safety claim. */

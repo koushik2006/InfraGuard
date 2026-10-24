@@ -22,8 +22,11 @@ Priority = Literal["P1", "P2", "P3", "P4"]
 VerificationOutcome = Literal["persists", "improves", "cannot_assess"]
 AgentName = Literal["sentinel", "investigator", "prioritiser", "planner", "verifier"]
 AgentStatus = Literal["idle", "running", "done", "fallback_used", "error"]
-WorkOrderStatus = Literal["proposed", "approved", "rejected", "assigned", "in_progress", "awaiting_verification",
-                          "verified", "returned", "completed"]
+# Stage mapping: proposed=1 Engineer review, approved=2 Assignment, assigned=3 Officer acceptance,
+# accepted/in_progress/returned=4 Work execution, submitting_evidence=5 Evidence submission,
+# awaiting_verification=6 Engineer evidence approval, verified=7 Job completed (evidence approved by an engineer).
+WorkOrderStatus = Literal["proposed", "approved", "rejected", "assigned", "accepted", "in_progress", "submitting_evidence",
+                          "awaiting_verification", "verified", "returned", "completed"]
 Role = Literal["viewer", "engineer", "asset_owner", "maintenance"]
 FollowUpSet = Literal["persists", "improves", "insufficient"]
 
@@ -381,6 +384,9 @@ class Attachment(Strict):
     size: int
     sha256: str
     content_type: str
+    attachment_id: Optional[str] = None
+    uploaded_by: Optional[str] = None
+    uploaded_at: Optional[str] = None
 
 
 class Completion(Strict):
@@ -388,7 +394,24 @@ class Completion(Strict):
     submitted_by: str
     submitted_at: str
     sim_time: str
-    attachment: Optional[Attachment] = None
+    attachment: Optional[Attachment] = None          # legacy single attachment (kept for older records)
+    attachments: list[Attachment] = []
+    version: int = 1                                 # evidence submission version (increments after "further work")
+    no_attachment_reason: Optional[str] = None
+
+
+class Acceptance(Strict):
+    person: str
+    at: str
+    sim_time: str
+
+
+class Decline(Strict):
+    person: str
+    team: str
+    reason: str
+    at: str
+    sim_time: str
 
 
 class Review(Strict):
@@ -398,6 +421,7 @@ class Review(Strict):
     reason: str
     at: str
     sim_time: str
+    evidence_version: Optional[int] = None
 
 
 class WorkOrderDraft(Strict):
@@ -421,6 +445,18 @@ class WorkOrderDraft(Strict):
     completion: Optional[Completion] = None
     review: Optional[Review] = None
     escalated_at: Optional[str] = None
+    # engineer-defined additions (never invented by the system): shown in the report only when present
+    precautions: list[str] = []
+    acceptance_criteria: list[str] = []
+    revision: int = 1                                # instruction revision (increments with every engineer edit)
+    edited_by: Optional[str] = None
+    edited_at: Optional[str] = None
+    acceptance: Optional[Acceptance] = None
+    last_decline: Optional[Decline] = None
+    evidence_version: int = 0
+    completion_history: list[Completion] = []
+    started_at: Optional[str] = None
+    completion_draft: Optional[str] = None
 
 
 class ApprovalRequest(Strict):

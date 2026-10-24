@@ -14,7 +14,7 @@ export function IncidentHeader({ d, right, trail }: { d: IncidentDetail; right?:
   const wo = d.work_orders.at(-1);
   const next = nextAction({ state: d.incident.state, incident_id: id, work_order_id: wo?.work_order_id ?? null, work_order_status: wo?.status ?? null });
   const here = `/incidents/${id}`;
-  const status = d.incident.closed ? "Closed by human reviewer" : d.incident.escalation ? "Escalation required" : "Investigate";
+  const status = d.incident.closed ? "Investigation completed" : d.incident.escalation ? "Escalation required" : "Investigate";
   return (
     <div className="mb-5">
       <Breadcrumbs items={[{ label: "Investigations", href: "/incidents" }, trail ? { label: <span className="num">{id}</span>, href: here } : { label: <span className="num">{id}</span> }, ...(trail ? [{ label: trail }] : [])]} />

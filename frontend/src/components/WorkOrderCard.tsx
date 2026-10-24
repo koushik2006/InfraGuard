@@ -7,7 +7,7 @@ import type { WorkOrderRow } from "@/lib/types";
 import { WO_STATUS_LABEL } from "@/lib/workflow";
 
 export const STATUS_TONE: Record<string, "amber" | "blue" | "slate" | "red" | "neutral"> = {
-  proposed: "amber", approved: "amber", assigned: "blue", in_progress: "blue", awaiting_verification: "amber", verified: "slate", returned: "amber", rejected: "slate",
+  proposed: "amber", approved: "amber", assigned: "amber", accepted: "blue", in_progress: "blue", submitting_evidence: "blue", awaiting_verification: "amber", verified: "slate", returned: "amber", rejected: "slate",
 };
 
 export function attention(w: WorkOrderRow) {
@@ -24,6 +24,7 @@ export function WorkOrderCard({ w }: { w: WorkOrderRow }) {
             <Link href={`/work-orders/${w.work_order_id}`} className="num text-sm font-semibold text-blue hover:underline">{w.work_order_id}</Link>
             <span className="text-xs text-faint">for <Link href={`/incidents/${w.incident_id}`} className="num hover:text-text hover:underline">{w.incident_id}</Link></span>
             <Badge tone={STATUS_TONE[w.status] ?? "neutral"}>{WO_STATUS_LABEL[w.status] ?? w.status}</Badge>
+            <span className="text-[11px] text-faint">Stage {w.stage} of 7 · {w.stage_label}</span>
             <Badge tone={w.priority === "P1" ? "red" : "neutral"}>{w.priority} · {w.timeframe}</Badge>
             {w.overdue && <Badge tone="red" icon={<AlertTriangle size={11} />}>Overdue{w.escalated ? " · escalated" : ""}</Badge>}
           </div>
@@ -35,7 +36,7 @@ export function WorkOrderCard({ w }: { w: WorkOrderRow }) {
         <div className="flex flex-col items-end gap-2">
           <p className={`text-xs font-semibold ${w.next_action.urgent ? "text-amber" : "text-muted"}`}>Next: {w.next_action.label}</p>
           <div className="flex items-center gap-2">
-            <Link href={`/work-orders/${w.work_order_id}#history`} className="inline-flex items-center gap-1 text-xs text-blue hover:underline"><History size={12} /> View Activity History</Link>
+            <Link href={`/audit?work_order=${w.work_order_id}`} className="inline-flex items-center gap-1 text-xs text-blue hover:underline"><History size={12} /> Audit trail</Link>
             <Link href={`/work-orders/${w.work_order_id}`}><Button size="sm" variant={hot ? "primary" : "secondary"}>Open <ArrowRight size={13} /></Button></Link>
           </div>
         </div>
