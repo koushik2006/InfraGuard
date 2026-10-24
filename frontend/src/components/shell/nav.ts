@@ -1,4 +1,4 @@
-import { Box, ClipboardCheck, LayoutDashboard, ScanSearch, ShieldCheck } from "lucide-react";
+import { Box, ClipboardCheck, LayoutDashboard, ScanSearch, ShieldCheck, TrendingUp } from "lucide-react";
 import type { AppState } from "@/lib/types";
 
 export interface NavItem { key: string; label: string; href: string; icon: React.ElementType; shortcut: string; match: (p: string) => boolean }
@@ -22,5 +22,6 @@ export function navItems(): NavItem[] {
     { key: "investigations", label: "Investigations", href: "/incidents", icon: ScanSearch, shortcut: "3", match: (p) => p.startsWith("/incidents") },
     { key: "workorders", label: "Work Orders", href: "/work-orders", icon: ClipboardCheck, shortcut: "4", match: (p) => p.startsWith("/work-orders") },
     { key: "audit", label: "Audit Trail", href: "/audit", icon: ShieldCheck, shortcut: "5", match: (p) => p.startsWith("/audit") },
+    { key: "impact", label: "Business Impact", href: "/impact", icon: TrendingUp, shortcut: "6", match: (p) => p.startsWith("/impact") },
   ];
 }

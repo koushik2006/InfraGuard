@@ -39,7 +39,7 @@ const hlKind = () => page.locator("[data-highlight]").first().getAttribute("data
 await post("/api/sim/reset", { seed: 4242 });
 await go("/");
 const navLabels = await page.locator('nav[aria-label="Primary"] ul li a').evaluateAll((els) => els.map((e) => e.getAttribute("aria-label")));
-check("five navigation items: the four originals plus a dedicated Audit Trail", JSON.stringify(navLabels) === JSON.stringify(["Overview", "Infrastructure", "Investigations", "Work Orders", "Audit Trail"]), navLabels.join(" | "));
+check("six navigation items: the four originals plus Audit Trail and Business Impact", JSON.stringify(navLabels) === JSON.stringify(["Overview", "Infrastructure", "Investigations", "Work Orders", "Audit Trail", "Business Impact"]), navLabels.join(" | "));
 check("only Bridge Alpha is visible", !/Civic Annex|Hillside|BLD-204|RW-031/i.test(await body()) && JSON.stringify((await get("/api/assets")).map((a) => a.asset_id)) === '["BRG-017"]');
 
 // ======================================================================= 1. run to the anomaly: flags map to findings
@@ -332,7 +332,7 @@ const woEvents = (await get(`/api/audit?work_order_id=${woId}&order=asc`)).event
 const expectedSeq = ["proposed", "proposal_edited", "approved", "assigned", "assignment_declined", "assigned", "assignment_accepted", "work_started", "progress_update", "delay_reported", "overdue_escalation", "evidence_stage_opened", "evidence_file_uploaded", "evidence_file_replaced", "evidence_file_uploaded", "evidence_file_removed", "completion_submitted", "further_work_requested", "progress_update", "evidence_stage_opened", "evidence_file_uploaded", "completion_submitted", "evidence_approved", "work_order_completed", "investigation_completed"];
 check("TEST 11a the audit log holds every action in chronological order with real actors", JSON.stringify(woEvents) === JSON.stringify(expectedSeq), woEvents.join(","));
 await page.locator('nav[aria-label="Primary"] a[aria-label="Audit Trail"]').click(); await page.waitForURL(/\/audit/); await settle(1500);
-check("Audit Trail is its own sidebar destination (five items), separate from Work Orders", (await page.locator("main h1").first().innerText()) === "Audit Trail" && (await page.locator('nav[aria-label="Primary"] ul li a').count()) === 5);
+check("Audit Trail is its own sidebar destination (six items in total), separate from Work Orders", (await page.locator("main h1").first().innerText()) === "Audit Trail" && (await page.locator('nav[aria-label="Primary"] ul li a').count()) === 6);
 check("order is clearly indicated and newest first by default", /newest first/.test(await body()));
 await page.getByLabel("Filter by work order").selectOption(woId); await settle(1200);
 const nAll = Number(await page.getByTestId("audit-count").innerText());
@@ -373,8 +373,22 @@ await page.getByRole("button", { name: /Confirm rejection/ }).click(); await set
 const w2 = (await wo(wo2.work_order_id)).work_order;
 check("TEST 5d rejection stores the reason, the order never becomes live and cannot be assigned", w2.status === "rejected" && (await get(`/api/work-orders/${wo2.work_order_id}/history`)).some((e) => e.action === "rejected" && /Duplicate of work/.test(e.summary)) && (await postRaw(`/api/work-orders/${wo2.work_order_id}/assign`, { ...eng, team: "Bridge Inspection Team (demo)", person: OFFICER, due_date: simDate })).status() >= 400 && /rejected/i.test(await body()));
 
+// ======================================================================= 12b. Business Impact page
+await go("/impact", 2500);
+const imp1 = await page.getByTestId("kpis-incident").innerText();
+check("Business Impact (per incident): 9 h -> 3 h, ₹13,500 -> ₹4,500, saves ≈ ₹9,000, with the illustrative-model disclosure", /9\s*h/.test(imp1) && /3\s*h/.test(imp1) && /13,500/.test(imp1) && /4,500/.test(imp1) && /9,000/.test(imp1) && /67%/.test(imp1) && /Illustrative model/.test(await body()));
+check("Business Impact shows the detection time measured from this run (simulated clock)", /Time to flag \(measured\)/i.test(imp1) && /\d+ min|30–45 min/.test(imp1));
+const pageText = await body();
+check("the per-incident comparison table has all six rows", ["How an issue is noticed", "Triage and investigation", "Work-order report", "Engineer effort per real incident", "A false alarm", "Audit trail"].every((t) => pageText.includes(t)));
+await page.getByRole("radio", { name: /Per year/ }).click(); await settle(1800);
+const imp2 = await page.getByTestId("kpis-year").innerText();
+check("Business Impact (per year): ₹211 L vs ₹138 L, saves ≈ ₹73 L (35%), net ≈ ₹53 L after the platform cost", /211/.test(imp2) && /138/.test(imp2) && /73/.test(imp2) && /35%/.test(imp2) && /53/.test(imp2));
+const tbl = await page.locator("table").last().innerText();
+check("the annual cost-line table matches the agreed figures", ["43.2", "17.3", "6.5", "1.3", "3.0", "1.5", "24.0", "12.0", "48.0", "40.8", "86.4", "64.8"].every((n) => tbl.includes(n)));
+check("assumptions are listed", (await page.getByText("Assumptions behind these figures").count()) === 1);
+
 // ======================================================================= 13. no regressions
-for (const [path, h1] of [["/", "Overview"], ["/assets", "Infrastructure"], ["/incidents", "Investigations"], ["/work-orders", "Work Orders"], ["/audit", "Audit Trail"]]) {
+for (const [path, h1] of [["/", "Overview"], ["/assets", "Infrastructure"], ["/incidents", "Investigations"], ["/work-orders", "Work Orders"], ["/audit", "Audit Trail"], ["/impact", "Business Impact"]]) {
   await go(path, 1200);
   check(`page ${path} renders "${h1}"`, (await page.locator("main h1").first().innerText()) === h1);
 }

@@ -26,7 +26,7 @@ cd frontend && npm run dev
 ```
 
 Open http://localhost:3000. Backend tests: `.venv/Scripts/python -m pytest tests -q` (70 tests).
-End-to-end UI journey (needs both servers + Chrome; 119 checks): `cd frontend && node scripts/e2e-check.mjs ../docs/screenshots`.
+End-to-end UI journey (needs both servers + Chrome; 126 checks): `cd frontend && node scripts/e2e-check.mjs ../docs/screenshots`.
 After restarting the backend, `node scripts/e2e-persist.mjs` re-checks that the completed journey (stage, evidence PDF, reports, audit trail) survived.
 Uploads: `INFRAGUARD_MAX_UPLOAD_MB` (default 5) sets the evidence file-size limit.
 
@@ -118,6 +118,10 @@ backend (`/follow-up`, `/close`) but are not part of this workflow.
   approval (**Approve Evidence** or **Request Further Work**), 7 job completed (links to the final report, evidence and audit trail, and
   **Return to 3D Bridge Model**). Evidence files are stored under `backend/data/evidence/<work order>/` with SHA-256 and a database record
   (`work_order_attachments`); resubmission after further work creates evidence version 2 and keeps version 1.
+* **Business Impact** (`/impact`, sidebar): the usual inspection process compared with InfraGuard, per incident (engineer hours 9 → 3,
+  cost, a false alarm) and per year for a 10-structure network (₹211 L → ₹138 L). It is an **illustrative model**: every input is an
+  assumption listed on the page (`frontend/src/lib/impact.ts`) to be confirmed with an operator; only the detection time is measured
+  (from the live incident, simulated clock). Charts use Recharts and the app's own styling.
 * **Resource Planner report** (`GET /api/work-orders/<id>/report[?version=n]`): print-ready HTML with InfraGuard branding, sections A-F (header,
   incident summary, sensor readings and technical evidence, investigation and decisions, work instructions, completion requirements), tables,
   inline trend charts from the stored findings, and page numbers; **Download / Print PDF** uses the browser's Save-as-PDF because the project has
